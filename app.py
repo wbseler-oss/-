@@ -32,6 +32,10 @@ PAGE = """
     tr.clickable:hover { background: rgba(59,130,246,.12); }
     .muted { color: rgba(230,237,243,.75); font-size:13px; }
     .scroll { max-height: 480px; overflow:auto; }
+    .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+    .chip { padding:6px 10px; border-radius:999px; background:rgba(59,130,246,.18); border:1px solid rgba(59,130,246,.4); color:#bfdbfe; cursor:pointer; font-size:12px; }
+    .chip:hover { filter: brightness(1.1); }
+
   </style>
 </head>
 <body>
@@ -58,8 +62,14 @@ PAGE = """
         <div id="price" class="muted">Цена: -</div>
         <div id="confidence" class="muted">Уверенность: -</div>
         <div id="stats" class="muted">Статистика: -</div>
+        <div id="regime" class="muted">Режим рынка: -</div>
         <div id="note" class="muted"></div>
       </div>
+    </div>
+
+    <div class="card">
+      <h3>Недавно анализировались</h3>
+      <div id="recentList" class="chips"></div>
     </div>
 
     <div class="card">
@@ -74,6 +84,7 @@ PAGE = """
               <th>Цена</th>
               <th>Winrate</th>
               <th>PF</th>
+              <th>Режим рынка</th>
               <th>Причина</th>
             </tr>
           </thead>
@@ -86,6 +97,44 @@ PAGE = """
 <script>
 let chart;
 let timer;
+
+const RECENT_KEY = 'recentTickersV1';
+
+function getRecentTickers() {
+  try {
+    const raw = localStorage.getItem(RECENT_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveRecentTicker(ticker) {
+  const t = (ticker || '').toUpperCase();
+  if (!t) return;
+  const list = getRecentTickers().filter(x => x !== t);
+  list.unshift(t);
+  localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 12)));
+}
+
+function renderRecentTickers() {
+  const wrap = document.getElementById('recentList');
+  wrap.innerHTML = '';
+  const list = getRecentTickers();
+  if (!list.length) {
+    wrap.innerHTML = '<span class="muted">Пока пусто — откройте анализ нескольких тикеров.</span>';
+    return;
+  }
+  list.forEach(t => {
+    const chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.textContent = t;
+    chip.addEventListener('click', () => analyzeTicker(t));
+    wrap.appendChild(chip);
+  });
+}
+
 
 function pillClass(signal) {
   if (signal === 'BUY') return 'pill buy';
@@ -157,8 +206,11 @@ async function analyzeTicker(ticker) {
   document.getElementById('confidence').textContent = `Уверенность: ${data.confidence || '-'}%`;
   const st = data.stats || {};
   document.getElementById('stats').textContent = `Сделок: ${st.total_trades ?? '-'} | Winrate: ${st.winrate_pct ?? '-'}% | PF: ${st.profit_factor ?? '-'}`;
+  document.getElementById('regime').textContent = `Режим рынка: ${data.market_regime_ru || '-'}`;
   document.getElementById('note').textContent = data.note || '';
 
+  saveRecentTicker(t);
+  renderRecentTickers();
   drawChart(data.labels || [], data.prices || [], data.buy_points || [], data.sell_points || [], data.close_points || []);
 }
 
@@ -171,7 +223,7 @@ async function loadRecommended() {
   (data.items || []).forEach(row => {
     const tr = document.createElement('tr');
     tr.className = 'clickable';
-    tr.innerHTML = `<td>${row.ticker}</td><td>${row.signal_ru}</td><td>${row.confidence}%</td><td>${row.price}</td><td>${row.winrate}%</td><td>${row.profit_factor}</td><td>${row.reason}</td>`;
+    tr.innerHTML = `<td>${row.ticker}</td><td>${row.signal_ru}</td><td>${row.confidence}%</td><td>${row.price}</td><td>${row.winrate}%</td><td>${row.profit_factor}</td><td>${row.market_regime_ru || '-'}</td><td>${row.reason}</td>`;
     tr.addEventListener('click', () => analyzeTicker(row.ticker));
     body.appendChild(tr);
   });
@@ -193,6 +245,7 @@ document.getElementById('analyzeBtn').addEventListener('click', () => analyzeTic
 document.getElementById('refreshRecoBtn').addEventListener('click', loadRecommended);
 
 loadTickers().then(() => {
+  renderRecentTickers();
   analyzeTicker('SBER');
   loadRecommended();
   initRealtime();
