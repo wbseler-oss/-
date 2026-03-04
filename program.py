@@ -174,6 +174,29 @@ def compute_adx(highs: list[float], lows: list[float], closes: list[float], peri
         adx.append(adx[-1] + alpha * (dx[i] - adx[-1]))
     return adx
 
+
+
+def compute_choppiness(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> list[float]:
+    if not closes:
+        return []
+    atr = compute_atr(highs, lows, closes, period)
+    out: list[float] = []
+    for i in range(len(closes)):
+        if i < period:
+            out.append(50.0)
+            continue
+        tr_sum = sum(atr[i - period + 1:i + 1])
+        hh = max(highs[i - period + 1:i + 1])
+        ll = min(lows[i - period + 1:i + 1])
+        span = hh - ll
+        if span <= 0:
+            out.append(100.0)
+            continue
+        # Классический Choppiness Index (0..100): низко = тренд, высоко = боковик.
+        out.append(max(0.0, min(100.0, 100 * (tr_sum / span) / period * 2.5)))
+    return out
+
+
 def parse_close_prices(rows: Iterable[list[object]], columns: list[str]) -> list[float]:
     close_idx = columns.index("CLOSE")
     legal_close_idx = columns.index("LEGALCLOSEPRICE")
@@ -279,7 +302,7 @@ def fetch_intraday_bars(ticker: str, interval: int = 10, lookback_hours: int = 1
 
 
 def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float], lows: list[float], volumes: list[float]) -> dict[str, Any]:
-    if len(closes) < 50:
+    if len(closes) < 60:
         raise RuntimeError("Недостаточно свечей для надежного интрадей анализа")
 
     ema9, ema21, ema50 = compute_ema(closes, 9), compute_ema(closes, 21), compute_ema(closes, 50)
@@ -288,74 +311,79 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
     vwap = compute_vwap(highs, lows, closes, volumes)
     atr = compute_atr(highs, lows, closes, 14)
     adx = compute_adx(highs, lows, closes, 14)
+    chop = compute_choppiness(highs, lows, closes, 14)
 
-    # Параметры трендовой модели: в боковике не торгуем, в тренде держим позицию до явного разворота.
-    min_hold_bars = 8
+    min_hold_bars = 10
     reversal_confirm_bars = 3
-    initial_stop_atr = 1.6
-    trend_trail_atr = 2.3
-    reversal_trail_atr = 1.4
-    break_even_arm_atr = 3.0
-    break_even_lock_atr = 0.25
-    adx_entry_threshold = 22.0
-    adx_trend_threshold = 20.0
-    adx_range_threshold = 16.0
-    ema_gap_threshold = 0.12
-    trend_band_threshold = 0.38
+    hard_stop_atr = 1.8
+    trend_trail_atr = 2.8
+    weak_trail_atr = 1.6
+    break_even_arm_atr = 4.0
+    break_even_lock_atr = 0.5
 
-    trades, points = [], []
-    pos = "FLAT"  # FLAT/LONG/SHORT
+    adx_trend_threshold = 23.0
+    adx_weak_threshold = 18.0
+    ema_spread_trend_pct = 0.16
+    ema_slope_trend_pct = 0.03
+    chop_trend_max = 46.0
+
+    trades: list[dict[str, Any]] = []
+    points: list[dict[str, Any]] = []
+    regimes: list[str] = ["RANGE"]
+
+    pos = "FLAT"
     entry_price, entry_i, stop = 0.0, 0, 0.0
     best_price, worst_price = 0.0, 0.0
     reversal_count = 0
     break_even_armed = False
 
+    def trend_regime(i: int) -> str:
+        price = closes[i]
+        spread = abs(ema21[i] - ema50[i]) / price * 100 if price else 0.0
+        slope = (ema50[i] - ema50[i - 1]) / price * 100 if i > 0 and price else 0.0
+        if adx[i] >= adx_trend_threshold and spread >= ema_spread_trend_pct and abs(slope) >= ema_slope_trend_pct and chop[i] <= chop_trend_max:
+            return "TREND"
+        return "RANGE"
+
     for i in range(1, len(closes)):
         price = closes[i]
         atr_pct = (atr[i] / price) * 100 if price else 0.0
-        volatility_ok = 0.10 <= atr_pct <= 2.4
-        ema_gap_pct = abs(ema21[i] - ema50[i]) / price * 100 if price else 0.0
+        volatility_ok = 0.08 <= atr_pct <= 2.8
 
-        trend_up = price > ema50[i] and ema50[i] >= ema50[i - 1]
-        trend_down = price < ema50[i] and ema50[i] <= ema50[i - 1]
-        adx_strong = adx[i] >= adx_entry_threshold
-        trend_strength_ok = ema_gap_pct >= ema_gap_threshold
+        regime = trend_regime(i)
+        prev_regime = regimes[-1]
+        regimes.append(regime)
 
-        long_setup = (
-            ema9[i] > ema21[i]
-            and macd_hist[i] > 0
-            and 47 <= rsi[i] <= 72
-            and price > vwap[i]
-            and adx_strong
-            and trend_strength_ok
-        )
-        short_setup = (
-            ema9[i] < ema21[i]
-            and macd_hist[i] < 0
-            and 28 <= rsi[i] <= 53
-            and price < vwap[i]
-            and adx_strong
-            and trend_strength_ok
-        )
+        if regime != prev_regime:
+            if regime == "TREND":
+                points.append({"type": "INFO", "index": i, "time": labels[i], "price": round(price, 4), "comment": "Начало трендовой фазы"})
+            else:
+                points.append({"type": "INFO", "index": i, "time": labels[i], "price": round(price, 4), "comment": "Завершение тренда / переход в боковик"})
 
-        cross_up = ema9[i - 1] <= ema21[i - 1] and ema9[i] > ema21[i]
-        cross_dn = ema9[i - 1] >= ema21[i - 1] and ema9[i] < ema21[i]
+        trend_up = price > ema50[i] and ema21[i] >= ema21[i - 1] and ema50[i] >= ema50[i - 1]
+        trend_down = price < ema50[i] and ema21[i] <= ema21[i - 1] and ema50[i] <= ema50[i - 1]
+
+        long_setup = trend_up and macd_hist[i] >= -0.0005 and 40 <= rsi[i] <= 85 and price > vwap[i]
+        short_setup = trend_down and macd_hist[i] <= 0.0005 and rsi[i] <= 60 and price < vwap[i]
+
+        long_trigger = ema9[i] > ema21[i] and ema9[i] >= ema9[i - 1]
+        short_trigger = ema9[i] < ema21[i] and ema9[i] <= ema9[i - 1]
 
         if pos == "FLAT":
-            if cross_up and trend_up and long_setup and volatility_ok:
+            if regime == "TREND" and volatility_ok and long_trigger and long_setup:
                 pos, entry_price, entry_i = "LONG", price, i
-                stop = price - initial_stop_atr * atr[i]
+                stop = price - hard_stop_atr * atr[i]
                 best_price, worst_price = highs[i], lows[i]
                 reversal_count = 0
                 break_even_armed = False
-                points.append({"type": "BUY", "type_ru": "Покупка (лонг)", "index": i, "time": labels[i], "price": round(price, 4), "comment": "Вход в лонг: сильный тренд подтвержден"})
-            elif cross_dn and trend_down and short_setup and volatility_ok:
+                points.append({"type": "BUY", "type_ru": "Покупка (лонг)", "index": i, "time": labels[i], "price": round(price, 4), "comment": "Вход в лонг: старт/продолжение тренда"})
+            elif regime == "TREND" and volatility_ok and short_trigger and short_setup:
                 pos, entry_price, entry_i = "SHORT", price, i
-                stop = price + initial_stop_atr * atr[i]
+                stop = price + hard_stop_atr * atr[i]
                 best_price, worst_price = highs[i], lows[i]
                 reversal_count = 0
                 break_even_armed = False
-                points.append({"type": "SELL", "type_ru": "Продажа (шорт)", "index": i, "time": labels[i], "price": round(price, 4), "comment": "Вход в шорт: сильный тренд подтвержден"})
+                points.append({"type": "SELL", "type_ru": "Продажа (шорт)", "index": i, "time": labels[i], "price": round(price, 4), "comment": "Вход в шорт: старт/продолжение тренда"})
             continue
 
         if pos == "LONG":
@@ -365,58 +393,46 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
                 break_even_armed = True
                 stop = max(stop, entry_price + break_even_lock_atr * atr[i])
 
-            reverse_signal = ema9[i] < ema21[i] and macd_hist[i] < 0 and price < vwap[i] and price < ema50[i]
-            adx_weakening = adx[i] < adx_trend_threshold
-            reversal_count = reversal_count + 1 if reverse_signal else 0
+            reversal_signal = ema9[i] < ema21[i] and macd_hist[i] < 0 and rsi[i] < 48 and price < ema50[i]
+            reversal_count = reversal_count + 1 if reversal_signal else 0
             enough_hold = (i - entry_i) >= min_hold_bars
-            clear_reversal = enough_hold and reversal_count >= reversal_confirm_bars and adx_weakening
+            clear_reversal = enough_hold and reversal_count >= reversal_confirm_bars and (regime == "RANGE" or adx[i] < adx_weak_threshold)
 
-            trail_atr = reversal_trail_atr if clear_reversal else trend_trail_atr
+            trail_atr = weak_trail_atr if clear_reversal else trend_trail_atr
             stop = max(stop, best_price - trail_atr * atr[i])
 
             exit_reason = None
             if lows[i] <= stop:
                 exit_price = stop
-                if clear_reversal:
-                    exit_reason = "Закрытие лонга: явный разворот подтвержден"
-                elif break_even_armed:
-                    exit_reason = "Закрытие лонга: трейлинг по тренду"
-                else:
-                    exit_reason = "Закрытие лонга: защитный стоп"
-            elif clear_reversal and rsi[i] < 48:
+                exit_reason = "Закрытие лонга: трейлинг (до явного разворота удерживаем тренд)"
+            elif clear_reversal:
                 exit_price = price
-                exit_reason = "Закрытие лонга: подтвержденный разворот (3 бара)"
+                exit_reason = "Закрытие лонга: тренд завершился (подтвержденный разворот)"
             else:
                 continue
             pnl = (exit_price - entry_price) / entry_price * 100
-        else:  # SHORT
+        else:
             worst_price = min(worst_price, lows[i])
             mfe = entry_price - worst_price
             if (not break_even_armed) and mfe >= break_even_arm_atr * atr[i]:
                 break_even_armed = True
                 stop = min(stop, entry_price - break_even_lock_atr * atr[i])
 
-            reverse_signal = ema9[i] > ema21[i] and macd_hist[i] > 0 and price > vwap[i] and price > ema50[i]
-            adx_weakening = adx[i] < adx_trend_threshold
-            reversal_count = reversal_count + 1 if reverse_signal else 0
+            reversal_signal = ema9[i] > ema21[i] and macd_hist[i] > 0 and rsi[i] > 52 and price > ema50[i]
+            reversal_count = reversal_count + 1 if reversal_signal else 0
             enough_hold = (i - entry_i) >= min_hold_bars
-            clear_reversal = enough_hold and reversal_count >= reversal_confirm_bars and adx_weakening
+            clear_reversal = enough_hold and reversal_count >= reversal_confirm_bars and (regime == "RANGE" or adx[i] < adx_weak_threshold)
 
-            trail_atr = reversal_trail_atr if clear_reversal else trend_trail_atr
+            trail_atr = weak_trail_atr if clear_reversal else trend_trail_atr
             stop = min(stop, worst_price + trail_atr * atr[i])
 
             exit_reason = None
             if highs[i] >= stop:
                 exit_price = stop
-                if clear_reversal:
-                    exit_reason = "Закрытие шорта: явный разворот подтвержден"
-                elif break_even_armed:
-                    exit_reason = "Закрытие шорта: трейлинг по тренду"
-                else:
-                    exit_reason = "Закрытие шорта: защитный стоп"
-            elif clear_reversal and rsi[i] > 52:
+                exit_reason = "Закрытие шорта: трейлинг (до явного разворота удерживаем тренд)"
+            elif clear_reversal:
                 exit_price = price
-                exit_reason = "Закрытие шорта: подтвержденный разворот (3 бара)"
+                exit_reason = "Закрытие шорта: тренд завершился (подтвержденный разворот)"
             else:
                 continue
             pnl = (entry_price - exit_price) / entry_price * 100
@@ -445,7 +461,7 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
 
     ema_gap_last_pct = abs(ema21[-1] - ema50[-1]) / closes[-1] * 100 if closes[-1] else 0.0
-    if adx[-1] < adx_range_threshold or ema_gap_last_pct < trend_band_threshold:
+    if trend_regime(len(closes) - 1) == "RANGE":
         market_regime = "RANGE"
         market_regime_ru = "Боковик"
     elif ema21[-1] >= ema50[-1]:
@@ -455,19 +471,32 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
         market_regime = "TREND_DOWN"
         market_regime_ru = "Тренд вниз"
 
-    long_score = int(closes[-1] > ema50[-1]) + int(ema9[-1] > ema21[-1]) + int(macd_hist[-1] > 0) + int(47 <= rsi[-1] <= 72) + int(closes[-1] > vwap[-1]) + int(adx[-1] >= adx_entry_threshold)
-    short_score = int(closes[-1] < ema50[-1]) + int(ema9[-1] < ema21[-1]) + int(macd_hist[-1] < 0) + int(28 <= rsi[-1] <= 53) + int(closes[-1] < vwap[-1]) + int(adx[-1] >= adx_entry_threshold)
+    # Поиск последнего старта и завершения тренда
+    trend_start = None
+    trend_end = None
+    for i in range(len(regimes) - 1, 0, -1):
+        if regimes[i] == "TREND" and regimes[i - 1] == "RANGE":
+            trend_start = labels[i]
+            break
+    if regimes[-1] == "RANGE":
+        for i in range(len(regimes) - 1, 0, -1):
+            if regimes[i] == "RANGE" and regimes[i - 1] == "TREND":
+                trend_end = labels[i]
+                break
+
+    long_score = int(ema21[-1] > ema50[-1]) + int(ema9[-1] > ema21[-1]) + int(macd_hist[-1] > 0) + int(rsi[-1] >= 50) + int(closes[-1] > vwap[-1]) + int(adx[-1] >= adx_trend_threshold)
+    short_score = int(ema21[-1] < ema50[-1]) + int(ema9[-1] < ema21[-1]) + int(macd_hist[-1] < 0) + int(rsi[-1] <= 50) + int(closes[-1] < vwap[-1]) + int(adx[-1] >= adx_trend_threshold)
 
     if market_regime == "RANGE":
-        signal, reason = "CLOSE", "Боковой рынок: сделок не открываем, ждём тренд"
+        signal, reason = "CLOSE", "Сейчас боковик: по стратегии новые сделки не открываем"
     elif long_score >= 5 and long_score > short_score:
-        signal, reason = "BUY", "Тренд вверх: ищем продолжение движения"
+        signal, reason = "BUY", "Тренд вверх подтвержден: можно искать вход в лонг"
     elif short_score >= 5 and short_score > long_score:
-        signal, reason = "SELL", "Тренд вниз: ищем продолжение движения"
+        signal, reason = "SELL", "Тренд вниз подтвержден: можно искать вход в шорт"
     else:
-        signal, reason = "CLOSE", "Нет явного трендового преимущества"
+        signal, reason = "CLOSE", "Нет достаточного перевеса в сторону тренда"
 
-    confidence = min(95, 48 + max(long_score, short_score) * 9 + (10 if winrate >= 55 and total >= 3 else 0))
+    confidence = min(95, 45 + max(long_score, short_score) * 9 + (8 if winrate >= 55 and total >= 3 else 0))
 
     return {
         "signal": signal,
@@ -493,23 +522,27 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
             "VWAP": round(vwap[-1], 4),
             "ATR14": round(atr[-1], 4),
             "ADX14": round(adx[-1], 2),
+            "CHOP14": round(chop[-1], 2),
             "EMA21_50_gap_pct": round(ema_gap_last_pct, 3),
         },
         "strategy_params": {
             "min_hold_bars": min_hold_bars,
             "reversal_confirm_bars": reversal_confirm_bars,
-            "initial_stop_atr": initial_stop_atr,
+            "hard_stop_atr": hard_stop_atr,
             "trend_trail_atr": trend_trail_atr,
-            "reversal_trail_atr": reversal_trail_atr,
+            "weak_trail_atr": weak_trail_atr,
             "break_even_arm_atr": break_even_arm_atr,
             "break_even_lock_atr": break_even_lock_atr,
-            "adx_entry_threshold": adx_entry_threshold,
             "adx_trend_threshold": adx_trend_threshold,
-            "adx_range_threshold": adx_range_threshold,
-            "ema_gap_threshold": ema_gap_threshold,
+            "adx_weak_threshold": adx_weak_threshold,
+            "ema_spread_trend_pct": ema_spread_trend_pct,
+            "ema_slope_trend_pct": ema_slope_trend_pct,
+            "chop_trend_max": chop_trend_max,
         },
         "market_regime": market_regime,
         "market_regime_ru": market_regime_ru,
+        "trend_start_time": trend_start,
+        "trend_end_time": trend_end,
     }
 
 
@@ -533,7 +566,7 @@ def run_daytrade_analysis(ticker: str) -> dict[str, Any]:
         "confidence": sim["confidence"],
         "reason": sim["reason"],
         "details": [
-            "Стратегия: только трендовый рынок (без сделок в боковике) + удержание до явного разворота",
+            "Стратегия: тренд-following intraday (в боковике не торгуем, держим позицию до подтвержденного разворота)",
             f"Сделок: {sim['stats']['total_trades']} | Winrate: {sim['stats']['winrate_pct']}%",
             f"Profit Factor: {sim['stats']['profit_factor']}",
         ],
@@ -541,6 +574,8 @@ def run_daytrade_analysis(ticker: str) -> dict[str, Any]:
         "strategy_params": sim["strategy_params"],
         "market_regime": sim["market_regime"],
         "market_regime_ru": sim["market_regime_ru"],
+        "trend_start_time": sim["trend_start_time"],
+        "trend_end_time": sim["trend_end_time"],
         "stats": sim["stats"],
         "trades": sim["trades"][-15:],
         "цена_сейчас": round(closes[-1], 4),
