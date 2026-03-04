@@ -130,6 +130,50 @@ def compute_atr(highs: list[float], lows: list[float], closes: list[float], peri
     return atr
 
 
+
+
+def compute_adx(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> list[float]:
+    if not closes:
+        return []
+
+    tr_values = [highs[0] - lows[0]]
+    plus_dm = [0.0]
+    minus_dm = [0.0]
+    for i in range(1, len(closes)):
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0.0)
+        minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0.0)
+        tr_values.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
+
+    alpha = 1 / period
+    tr_smooth = [tr_values[0]]
+    plus_smooth = [plus_dm[0]]
+    minus_smooth = [minus_dm[0]]
+    for i in range(1, len(closes)):
+        tr_smooth.append(tr_smooth[-1] + alpha * (tr_values[i] - tr_smooth[-1]))
+        plus_smooth.append(plus_smooth[-1] + alpha * (plus_dm[i] - plus_smooth[-1]))
+        minus_smooth.append(minus_smooth[-1] + alpha * (minus_dm[i] - minus_smooth[-1]))
+
+    plus_di, minus_di, dx = [0.0], [0.0], [0.0]
+    for i in range(1, len(closes)):
+        if tr_smooth[i] <= 0:
+            plus_di.append(0.0)
+            minus_di.append(0.0)
+            dx.append(0.0)
+            continue
+        pdi = 100 * plus_smooth[i] / tr_smooth[i]
+        mdi = 100 * minus_smooth[i] / tr_smooth[i]
+        plus_di.append(pdi)
+        minus_di.append(mdi)
+        denom = pdi + mdi
+        dx.append(100 * abs(pdi - mdi) / denom if denom else 0.0)
+
+    adx = [dx[0]]
+    for i in range(1, len(dx)):
+        adx.append(adx[-1] + alpha * (dx[i] - adx[-1]))
+    return adx
+
 def parse_close_prices(rows: Iterable[list[object]], columns: list[str]) -> list[float]:
     close_idx = columns.index("CLOSE")
     legal_close_idx = columns.index("LEGALCLOSEPRICE")
@@ -243,6 +287,7 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
     _, _, macd_hist = compute_macd(closes)
     vwap = compute_vwap(highs, lows, closes, volumes)
     atr = compute_atr(highs, lows, closes, 14)
+    adx = compute_adx(highs, lows, closes, 14)
 
     min_hold_bars = 4
     reversal_confirm_bars = 2
@@ -251,6 +296,9 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
     profit_arm_atr = 2.4
     armed_trail_atr = 1.8
     lock_profit_atr = 0.35
+    adx_entry_threshold = 18.0
+    ema_gap_threshold = 0.08
+    trend_band_threshold = 0.35
 
     trades, points = [], []
     pos = "FLAT"  # FLAT/LONG/SHORT
@@ -266,8 +314,11 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
 
         trend_up = price > ema50[i] and ema50[i] >= ema50[i - 1]
         trend_down = price < ema50[i] and ema50[i] <= ema50[i - 1]
-        long_setup = ema9[i] > ema21[i] and macd_hist[i] > 0 and 45 <= rsi[i] <= 68 and price > vwap[i]
-        short_setup = ema9[i] < ema21[i] and macd_hist[i] < 0 and 32 <= rsi[i] <= 55 and price < vwap[i]
+        ema_gap_pct = abs(ema21[i] - ema50[i]) / price * 100 if price else 0.0
+        adx_ok = adx[i] >= adx_entry_threshold
+        trend_strength_ok = ema_gap_pct >= ema_gap_threshold
+        long_setup = ema9[i] > ema21[i] and macd_hist[i] > 0 and 45 <= rsi[i] <= 68 and price > vwap[i] and adx_ok and trend_strength_ok
+        short_setup = ema9[i] < ema21[i] and macd_hist[i] < 0 and 32 <= rsi[i] <= 55 and price < vwap[i] and adx_ok and trend_strength_ok
 
         cross_up = ema9[i - 1] <= ema21[i - 1] and ema9[i] > ema21[i]
         cross_dn = ema9[i - 1] >= ema21[i - 1] and ema9[i] < ema21[i]
@@ -367,13 +418,26 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
     gross_loss = abs(sum(t["pnl_pct"] for t in losses))
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
 
-    long_score = int(closes[-1] > ema50[-1]) + int(ema9[-1] > ema21[-1]) + int(macd_hist[-1] > 0) + int(45 <= rsi[-1] <= 68) + int(closes[-1] > vwap[-1])
-    short_score = int(closes[-1] < ema50[-1]) + int(ema9[-1] < ema21[-1]) + int(macd_hist[-1] < 0) + int(32 <= rsi[-1] <= 55) + int(closes[-1] < vwap[-1])
+    ema_gap_last_pct = abs(ema21[-1] - ema50[-1]) / closes[-1] * 100 if closes[-1] else 0.0
+    if adx[-1] < 16 or ema_gap_last_pct < trend_band_threshold:
+        market_regime = "RANGE"
+        market_regime_ru = "Боковик"
+    elif ema21[-1] >= ema50[-1]:
+        market_regime = "TREND_UP"
+        market_regime_ru = "Тренд вверх"
+    else:
+        market_regime = "TREND_DOWN"
+        market_regime_ru = "Тренд вниз"
 
-    if long_score >= 4 and long_score > short_score:
-        signal, reason = "BUY", "Условия для лонга подтверждены"
-    elif short_score >= 4 and short_score > long_score:
-        signal, reason = "SELL", "Условия для шорта подтверждены"
+    long_score = int(closes[-1] > ema50[-1]) + int(ema9[-1] > ema21[-1]) + int(macd_hist[-1] > 0) + int(45 <= rsi[-1] <= 68) + int(closes[-1] > vwap[-1]) + int(adx[-1] >= adx_entry_threshold)
+    short_score = int(closes[-1] < ema50[-1]) + int(ema9[-1] < ema21[-1]) + int(macd_hist[-1] < 0) + int(32 <= rsi[-1] <= 55) + int(closes[-1] < vwap[-1]) + int(adx[-1] >= adx_entry_threshold)
+
+    if market_regime == "RANGE":
+        signal, reason = "CLOSE", "Рынок в боковике: лучше ждать подтвержденного импульса"
+    elif long_score >= 5 and long_score > short_score:
+        signal, reason = "BUY", f"Условия для лонга подтверждены ({market_regime_ru.lower()})"
+    elif short_score >= 5 and short_score > long_score:
+        signal, reason = "SELL", f"Условия для шорта подтверждены ({market_regime_ru.lower()})"
     else:
         signal, reason = "CLOSE", "Сейчас лучше быть вне позиции / закрывать риск"
 
@@ -402,6 +466,8 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
             "MACD_hist": round(macd_hist[-1], 5),
             "VWAP": round(vwap[-1], 4),
             "ATR14": round(atr[-1], 4),
+            "ADX14": round(adx[-1], 2),
+            "EMA21_50_gap_pct": round(ema_gap_last_pct, 3),
         },
         "strategy_params": {
             "min_hold_bars": min_hold_bars,
@@ -410,7 +476,11 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
             "base_trail_atr": base_trail_atr,
             "profit_arm_atr": profit_arm_atr,
             "armed_trail_atr": armed_trail_atr,
+            "adx_entry_threshold": adx_entry_threshold,
+            "ema_gap_threshold": ema_gap_threshold,
         },
+        "market_regime": market_regime,
+        "market_regime_ru": market_regime_ru,
     }
 
 
@@ -434,12 +504,14 @@ def run_daytrade_analysis(ticker: str) -> dict[str, Any]:
         "confidence": sim["confidence"],
         "reason": sim["reason"],
         "details": [
-            "Стратегия: тренд + импульс + VWAP + ATR + подтверждение разворота (2 бара) + адаптивный трейлинг",
+            "Стратегия: тренд + импульс + VWAP + ATR + ADX + подтверждение разворота (2 бара) + адаптивный трейлинг",
             f"Сделок: {sim['stats']['total_trades']} | Winrate: {sim['stats']['winrate_pct']}%",
             f"Profit Factor: {sim['stats']['profit_factor']}",
         ],
         "indicators": sim["indicators"],
         "strategy_params": sim["strategy_params"],
+        "market_regime": sim["market_regime"],
+        "market_regime_ru": sim["market_regime_ru"],
         "stats": sim["stats"],
         "trades": sim["trades"][-15:],
         "цена_сейчас": round(closes[-1], 4),
@@ -473,6 +545,8 @@ def run_screener(limit: int = 80, confidence_threshold: int = 80) -> dict[str, A
                     "confidence": r["confidence"],
                     "price": r["цена_сейчас"],
                     "reason": r["reason"],
+                    "market_regime": r.get("market_regime"),
+                    "market_regime_ru": r.get("market_regime_ru"),
                     "winrate": st.get("winrate_pct", 0.0),
                     "profit_factor": st.get("profit_factor", 0.0),
                 }
