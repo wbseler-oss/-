@@ -1,4 +1,4 @@
-"""Робот-аналитик MOEX: среднесрок + дневной трейдинг (интрадей)."""
+"""Профессиональный интрадей-аналитик MOEX (учебный)."""
 
 from __future__ import annotations
 
@@ -16,17 +16,7 @@ MOEX_CANDLES_URL = "https://iss.moex.com/iss/engines/stock/markets/shares/boards
 MOEX_SECURITIES_URL = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json"
 
 DEFAULT_TICKERS = [
-    "SBER",
-    "GAZP",
-    "LKOH",
-    "NVTK",
-    "ROSN",
-    "GMKN",
-    "TATN",
-    "YDEX",
-    "PLZL",
-    "CHMF",
-    "ALRS",
+    "SBER", "GAZP", "LKOH", "ROSN", "NVTK", "GMKN", "TATN", "PLZL", "CHMF", "ALRS", "MAGN", "MOEX", "MTSS"
 ]
 
 
@@ -43,72 +33,8 @@ class Recommendation:
 
 
 def signal_to_russian(signal: str) -> str:
-    mapping = {"BUY": "Покупать", "SELL": "Закрывать сделку", "HOLD": "Наблюдать"}
-    return mapping.get((signal or "").upper(), "Наблюдать")
-
-
-def moving_average(values: list[float], window: int) -> float:
-    if len(values) < window:
-        raise ValueError(f"Недостаточно данных для SMA{window}: {len(values)}")
-    return statistics.fmean(values[-window:])
-
-
-def compute_ema(values: list[float], period: int) -> list[float]:
-    if not values:
-        return []
-    k = 2 / (period + 1)
-    result = [values[0]]
-    for value in values[1:]:
-        result.append(value * k + result[-1] * (1 - k))
-    return result
-
-
-def compute_rsi(values: list[float], period: int = 14) -> float:
-    if len(values) <= period:
-        raise ValueError(f"Недостаточно данных для RSI{period}: {len(values)}")
-
-    gains: list[float] = []
-    losses: list[float] = []
-    for i in range(1, len(values)):
-        delta = values[i] - values[i - 1]
-        if delta >= 0:
-            gains.append(delta)
-            losses.append(0.0)
-        else:
-            gains.append(0.0)
-            losses.append(-delta)
-
-    avg_gain = statistics.fmean(gains[-period:])
-    avg_loss = statistics.fmean(losses[-period:])
-
-    if avg_loss == 0:
-        return 100.0
-
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-
-def classify_signal(last_price: float, sma_fast: float, sma_slow: float, rsi: float) -> tuple[str, str]:
-    trend_up = last_price > sma_fast > sma_slow
-    trend_down = last_price < sma_fast < sma_slow
-
-    if trend_up and rsi < 70:
-        return "BUY", "Восходящий тренд и RSI без перекупленности"
-    if trend_down and rsi > 30:
-        return "SELL", "Нисходящий тренд, слабая структура цены"
-    return "HOLD", "Смешанные сигналы — лучше подождать"
-
-
-def parse_close_prices(rows: Iterable[list[object]], columns: list[str]) -> list[float]:
-    close_idx = columns.index("CLOSE")
-    legal_close_idx = columns.index("LEGALCLOSEPRICE")
-
-    closes: list[float] = []
-    for row in rows:
-        value = row[close_idx] if row[close_idx] is not None else row[legal_close_idx]
-        if value is not None:
-            closes.append(float(value))
-    return closes
+    mapping = {"BUY": "КУПИТЬ", "SELL": "ПРОДАТЬ/ЗАКРЫТЬ", "HOLD": "ОЖИДАТЬ"}
+    return mapping.get((signal or "").upper(), "ОЖИДАТЬ")
 
 
 def _fetch_json(url: str, ticker: str) -> dict[str, Any]:
@@ -121,17 +47,80 @@ def _fetch_json(url: str, ticker: str) -> dict[str, Any]:
         raise RuntimeError(f"Ошибка сети для {ticker}: {error.reason}") from error
 
 
+def moving_average(values: list[float], window: int) -> float:
+    if len(values) < window:
+        raise ValueError(f"Недостаточно данных для SMA{window}: {len(values)}")
+    return statistics.fmean(values[-window:])
+
+
+def compute_ema(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    alpha = 2 / (period + 1)
+    out = [values[0]]
+    for value in values[1:]:
+        out.append(alpha * value + (1 - alpha) * out[-1])
+    return out
+
+
+def compute_rsi(values: list[float], period: int = 14) -> float:
+    if len(values) <= period:
+        raise ValueError(f"Недостаточно данных для RSI{period}: {len(values)}")
+
+    gains: list[float] = []
+    losses: list[float] = []
+    for i in range(1, len(values)):
+        diff = values[i] - values[i - 1]
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+
+    avg_gain = statistics.fmean(gains[-period:])
+    avg_loss = statistics.fmean(losses[-period:])
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - 100 / (1 + rs)
+
+
+def compute_macd(values: list[float]) -> tuple[list[float], list[float], list[float]]:
+    ema12 = compute_ema(values, 12)
+    ema26 = compute_ema(values, 26)
+    macd_line = [a - b for a, b in zip(ema12, ema26)]
+    signal_line = compute_ema(macd_line, 9)
+    hist = [m - s for m, s in zip(macd_line, signal_line)]
+    return macd_line, signal_line, hist
+
+
+def compute_bollinger(values: list[float], period: int = 20, num_std: float = 2.0) -> tuple[float, float, float]:
+    if len(values) < period:
+        raise ValueError("Недостаточно данных для Bollinger")
+    window = values[-period:]
+    mid = statistics.fmean(window)
+    std = statistics.pstdev(window)
+    return mid - num_std * std, mid, mid + num_std * std
+
+
+def parse_close_prices(rows: Iterable[list[object]], columns: list[str]) -> list[float]:
+    close_idx = columns.index("CLOSE")
+    legal_close_idx = columns.index("LEGALCLOSEPRICE")
+    closes: list[float] = []
+    for row in rows:
+        value = row[close_idx] if row[close_idx] is not None else row[legal_close_idx]
+        if value is not None:
+            closes.append(float(value))
+    return closes
+
+
 def fetch_close_prices(ticker: str, days: int) -> list[float]:
     start_date = (date.today() - timedelta(days=days)).isoformat()
-    all_rows: list[list[object]] = []
+    rows_all: list[list[object]] = []
     columns: list[str] = []
-
     offset = 0
+
     while True:
         query = urllib.parse.urlencode({"from": start_date, "start": offset})
         url = MOEX_HISTORY_URL.format(ticker=ticker.upper()) + f"?{query}"
         data = _fetch_json(url, ticker)
-
         history = data.get("history", {})
         page_columns = history.get("columns", [])
         page_rows = history.get("data", [])
@@ -140,86 +129,63 @@ def fetch_close_prices(ticker: str, days: int) -> list[float]:
             break
         if not columns:
             columns = page_columns
-
         if not page_rows:
             break
 
-        all_rows.extend(page_rows)
+        rows_all.extend(page_rows)
         offset += len(page_rows)
 
-    if not columns or not all_rows:
-        raise RuntimeError(f"Нет данных по тикеру {ticker}. Проверьте символ на MOEX.")
+    if not columns or not rows_all:
+        raise RuntimeError(f"Нет данных по тикеру {ticker}")
 
-    closes = parse_close_prices(all_rows, columns)
+    closes = parse_close_prices(rows_all, columns)
     if len(closes) < 20:
-        raise RuntimeError(f"Слишком мало исторических данных по {ticker}: {len(closes)}")
+        raise RuntimeError(f"Слишком мало данных по {ticker}: {len(closes)}")
     return closes
 
 
 def analyze_ticker(ticker: str) -> list[Recommendation]:
     closes = fetch_close_prices(ticker, days=365)
-
     timeframes = {
         "Краткосрок (2-4 недели)": (5, 20),
         "Среднесрок (1-3 месяца)": (20, 50),
         "Долгосрок (6-12 месяцев)": (50, 150),
     }
-
-    recommendations: list[Recommendation] = []
+    results: list[Recommendation] = []
     for timeframe, (fast, slow) in timeframes.items():
         last_price = closes[-1]
-
         if len(closes) < slow:
-            recommendations.append(
-                Recommendation(
-                    ticker=ticker.upper(),
-                    timeframe=timeframe,
-                    last_price=last_price,
-                    sma_fast=0.0,
-                    sma_slow=0.0,
-                    rsi=0.0,
-                    signal="HOLD",
-                    reason=f"Недостаточно данных для этого таймфрейма: нужно {slow}, есть {len(closes)}",
-                )
+            results.append(
+                Recommendation(ticker.upper(), timeframe, last_price, 0.0, 0.0, 0.0, "HOLD", f"Недостаточно данных: нужно {slow}, есть {len(closes)}")
             )
             continue
 
         sma_fast = moving_average(closes, fast)
         sma_slow = moving_average(closes, slow)
-        rsi = compute_rsi(closes, period=14)
-        signal, reason = classify_signal(last_price, sma_fast, sma_slow, rsi)
+        rsi = compute_rsi(closes)
 
-        recommendations.append(
-            Recommendation(
-                ticker=ticker.upper(),
-                timeframe=timeframe,
-                last_price=last_price,
-                sma_fast=sma_fast,
-                sma_slow=sma_slow,
-                rsi=rsi,
-                signal=signal,
-                reason=reason,
-            )
-        )
+        if last_price > sma_fast > sma_slow and rsi < 70:
+            signal, reason = "BUY", "Тренд вверх + RSI в рабочей зоне"
+        elif last_price < sma_fast < sma_slow and rsi > 30:
+            signal, reason = "SELL", "Тренд вниз"
+        else:
+            signal, reason = "HOLD", "Нейтральный фон"
 
-    return recommendations
+        results.append(Recommendation(ticker.upper(), timeframe, last_price, sma_fast, sma_slow, rsi, signal, reason))
+    return results
 
 
-def fetch_tickers_list(limit: int = 200) -> list[str]:
+def fetch_tickers_list(limit: int = 300) -> list[str]:
     all_tickers: list[str] = []
     offset = 0
-
     while len(all_tickers) < limit:
         query = urllib.parse.urlencode({"start": offset})
-        url = f"{MOEX_SECURITIES_URL}?{query}"
-        data = _fetch_json(url, "TQBR")
-
-        securities = data.get("securities", {})
-        columns = securities.get("columns", [])
-        rows = securities.get("data", [])
+        data = _fetch_json(f"{MOEX_SECURITIES_URL}?{query}", "TQBR")
+        sec = data.get("securities", {})
+        columns = sec.get("columns", [])
+        rows = sec.get("data", [])
         if not columns or not rows:
             break
-
         secid_idx = columns.index("SECID")
         for row in rows:
             secid = row[secid_idx]
@@ -227,33 +193,27 @@ def fetch_tickers_list(limit: int = 200) -> list[str]:
                 all_tickers.append(str(secid))
                 if len(all_tickers) >= limit:
                     break
-
         offset += len(rows)
-        if len(rows) == 0:
-            break
-
-    unique = sorted(set(all_tickers))
-    return unique or DEFAULT_TICKERS
+    uniq = sorted(set(all_tickers))
+    return uniq or DEFAULT_TICKERS
 
 
-def fetch_intraday_candles(ticker: str, interval: int = 10, lookback_hours: int = 12) -> tuple[list[str], list[float]]:
+def fetch_intraday_candles(ticker: str, interval: int = 10, lookback_hours: int = 12) -> tuple[list[str], list[float], list[float]]:
     from_dt = (date.today() - timedelta(days=1)).isoformat()
     params = urllib.parse.urlencode({"interval": interval, "from": from_dt})
-    url = MOEX_CANDLES_URL.format(ticker=ticker.upper()) + f"?{params}"
+    data = _fetch_json(MOEX_CANDLES_URL.format(ticker=ticker.upper()) + f"?{params}", ticker)
 
-    data = _fetch_json(url, ticker)
     candles = data.get("candles", {})
     columns = candles.get("columns", [])
     rows = candles.get("data", [])
-
     if not columns or not rows:
-        raise RuntimeError(f"Нет интрадей-данных по тикеру {ticker}")
+        raise RuntimeError(f"Нет интрадей-данных по {ticker}")
 
     close_idx = columns.index("close")
     begin_idx = columns.index("begin")
+    volume_idx = columns.index("volume") if "volume" in columns else None
 
-    labels: list[str] = []
-    prices: list[float] = []
+    labels, prices, volumes = [], [], []
     for row in rows:
         close = row[close_idx]
         begin = row[begin_idx]
@@ -261,63 +221,106 @@ def fetch_intraday_candles(ticker: str, interval: int = 10, lookback_hours: int 
             continue
         labels.append(str(begin)[11:16] if begin else "")
         prices.append(float(close))
+        volumes.append(float(row[volume_idx]) if volume_idx is not None and row[volume_idx] is not None else 0.0)
 
-    # ограничим последними свечами для скорости UI
-    max_points = max(24, int(lookback_hours * 60 / max(interval, 1)))
-    return labels[-max_points:], prices[-max_points:]
+    max_points = max(36, int(lookback_hours * 60 / max(1, interval)))
+    return labels[-max_points:], prices[-max_points:], volumes[-max_points:]
 
 
-def build_trade_points(labels: list[str], prices: list[float]) -> tuple[list[dict[str, Any]], str, str]:
-    if len(prices) < 30:
-        raise RuntimeError("Недостаточно интрадей-данных для сигнала. Попробуйте позже.")
+def _intraday_score(prices: list[float], volumes: list[float]) -> dict[str, Any]:
+    if len(prices) < 35:
+        raise RuntimeError("Недостаточно интрадей-данных для уверенного сигнала")
 
-    ema_fast = compute_ema(prices, 9)
-    ema_slow = compute_ema(prices, 21)
+    ema9 = compute_ema(prices, 9)
+    ema21 = compute_ema(prices, 21)
     rsi = compute_rsi(prices, 14)
+    macd_line, signal_line, hist = compute_macd(prices)
+    bb_low, bb_mid, bb_high = compute_bollinger(prices, 20, 2)
 
-    points: list[dict[str, Any]] = []
-    for idx in range(1, len(prices)):
-        was_below = ema_fast[idx - 1] <= ema_slow[idx - 1]
-        now_above = ema_fast[idx] > ema_slow[idx]
-        was_above = ema_fast[idx - 1] >= ema_slow[idx - 1]
-        now_below = ema_fast[idx] < ema_slow[idx]
+    last_price = prices[-1]
+    prev_price = prices[-2]
 
-        if was_below and now_above:
-            points.append(
-                {
-                    "type": "BUY",
-                    "type_ru": "Покупка",
-                    "index": idx,
-                    "time": labels[idx],
-                    "price": round(prices[idx], 4),
-                    "comment": "EMA9 пересекла EMA21 снизу вверх",
-                }
-            )
-        elif was_above and now_below:
-            points.append(
-                {
-                    "type": "SELL",
-                    "type_ru": "Закрытие",
-                    "index": idx,
-                    "time": labels[idx],
-                    "price": round(prices[idx], 4),
-                    "comment": "EMA9 пересекла EMA21 сверху вниз",
-                }
-            )
+    score = 0
+    reasons: list[str] = []
 
-    last_fast = ema_fast[-1]
-    last_slow = ema_slow[-1]
-    if last_fast > last_slow and rsi < 72:
+    if ema9[-1] > ema21[-1]:
+        score += 1
+        reasons.append("EMA9 выше EMA21")
+    else:
+        score -= 1
+        reasons.append("EMA9 ниже EMA21")
+
+    if hist[-1] > 0 and macd_line[-1] > signal_line[-1]:
+        score += 1
+        reasons.append("MACD в бычьей фазе")
+    elif hist[-1] < 0:
+        score -= 1
+        reasons.append("MACD в медвежьей фазе")
+
+    if 45 <= rsi <= 68:
+        score += 1
+        reasons.append("RSI в рабочем диапазоне")
+    elif rsi >= 75:
+        score -= 1
+        reasons.append("RSI показывает перегрев")
+    elif rsi <= 30:
+        score += 1
+        reasons.append("RSI в зоне перепроданности")
+
+    if last_price < bb_low:
+        score += 1
+        reasons.append("Цена ниже нижней Bollinger (потенциал отскока)")
+    elif last_price > bb_high:
+        score -= 1
+        reasons.append("Цена выше верхней Bollinger (риск отката)")
+
+    avg_volume = statistics.fmean(volumes[-20:]) if len(volumes) >= 20 else 0.0
+    if avg_volume > 0 and volumes[-1] > 1.35 * avg_volume:
+        if last_price > prev_price:
+            score += 1
+            reasons.append("Импульс подтвержден объемом")
+        else:
+            score -= 1
+            reasons.append("Высокий объем при снижении")
+
+    if score >= 2:
         signal = "BUY"
-        reason = "Сигнал на покупку: EMA9 выше EMA21, RSI не в сильной перекупленности"
-    elif last_fast < last_slow or rsi > 75:
+        core_reason = "Суммарно бычий набор индикаторов"
+    elif score <= -2:
         signal = "SELL"
-        reason = "Сигнал на закрытие: EMA9 ниже EMA21 или RSI показывает перегрев"
+        core_reason = "Суммарно медвежий набор индикаторов"
     else:
         signal = "HOLD"
-        reason = "Явного сигнала нет, лучше наблюдать"
+        core_reason = "Сигналы смешанные, лучше ждать"
 
-    return points, signal, reason
+    confidence = min(95, 50 + abs(score) * 12)
+
+    return {
+        "signal": signal,
+        "signal_ru": signal_to_russian(signal),
+        "confidence": confidence,
+        "reason": core_reason,
+        "details": reasons,
+        "ema9": round(ema9[-1], 4),
+        "ema21": round(ema21[-1], 4),
+        "rsi": round(rsi, 2),
+        "macd_hist": round(hist[-1], 5),
+        "bb_low": round(bb_low, 4),
+        "bb_mid": round(bb_mid, 4),
+        "bb_high": round(bb_high, 4),
+    }
+
+
+def build_trade_points(labels: list[str], prices: list[float]) -> list[dict[str, Any]]:
+    ema9 = compute_ema(prices, 9)
+    ema21 = compute_ema(prices, 21)
+    points: list[dict[str, Any]] = []
+    for i in range(1, len(prices)):
+        if ema9[i - 1] <= ema21[i - 1] and ema9[i] > ema21[i]:
+            points.append({"type": "BUY", "type_ru": "Покупка", "index": i, "time": labels[i], "price": round(prices[i], 4), "comment": "EMA9 пересекла EMA21 вверх"})
+        elif ema9[i - 1] >= ema21[i - 1] and ema9[i] < ema21[i]:
+            points.append({"type": "SELL", "type_ru": "Закрытие", "index": i, "time": labels[i], "price": round(prices[i], 4), "comment": "EMA9 пересекла EMA21 вниз"})
+    return points
 
 
 def run_daytrade_analysis(ticker: str) -> dict[str, Any]:
@@ -325,18 +328,30 @@ def run_daytrade_analysis(ticker: str) -> dict[str, Any]:
     if not ticker:
         raise ValueError("Тикер не должен быть пустым")
 
-    labels, prices = fetch_intraday_candles(ticker, interval=10, lookback_hours=12)
-    points, signal, reason = build_trade_points(labels, prices)
+    labels, prices, volumes = fetch_intraday_candles(ticker, interval=10, lookback_hours=12)
+    points = build_trade_points(labels, prices)
+    scored = _intraday_score(prices, volumes)
 
     buy_points = [p for p in points if p["type"] == "BUY"]
     sell_points = [p for p in points if p["type"] == "SELL"]
 
     return {
         "ticker": ticker,
-        "режим": "Дневной трейдинг (интервал 10 минут)",
-        "signal": signal,
-        "signal_ru": signal_to_russian(signal),
-        "reason": reason,
+        "режим": "Дневной трейдинг (10 минут)",
+        "signal": scored["signal"],
+        "signal_ru": scored["signal_ru"],
+        "confidence": scored["confidence"],
+        "reason": scored["reason"],
+        "details": scored["details"],
+        "indicators": {
+            "EMA9": scored["ema9"],
+            "EMA21": scored["ema21"],
+            "RSI14": scored["rsi"],
+            "MACD_hist": scored["macd_hist"],
+            "Bollinger_low": scored["bb_low"],
+            "Bollinger_mid": scored["bb_mid"],
+            "Bollinger_high": scored["bb_high"],
+        },
         "цена_сейчас": round(prices[-1], 4),
         "labels": labels,
         "prices": prices,
@@ -344,16 +359,37 @@ def run_daytrade_analysis(ticker: str) -> dict[str, Any]:
         "sell_points": sell_points,
         "all_points": points,
         "source": "Мосбиржа ISS",
-        "note": "Не является индивидуальной инвестиционной рекомендацией.",
+        "note": "Учебная модель. Не является инвестиционной рекомендацией.",
     }
 
 
-def run_analysis(ticker: str) -> dict[str, Any]:
-    """Совместимость: старый endpoint (среднесрочный обзор)."""
-    ticker = ticker.strip().upper()
-    if not ticker:
-        raise ValueError("Тикер не должен быть пустым")
+def run_screener(limit: int = 80) -> dict[str, Any]:
+    tickers = fetch_tickers_list(limit=limit)
+    rows: list[dict[str, Any]] = []
+    for ticker in tickers:
+        try:
+            result = run_daytrade_analysis(ticker)
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "signal": result["signal"],
+                    "signal_ru": result["signal_ru"],
+                    "confidence": result["confidence"],
+                    "price": result["цена_сейчас"],
+                    "reason": result["reason"],
+                }
+            )
+        except Exception:
+            continue
 
+    priority = {"BUY": 0, "HOLD": 1, "SELL": 2}
+    rows.sort(key=lambda x: (priority.get(x["signal"], 3), -x["confidence"]))
+    return {"count": len(rows), "items": rows, "source": "Мосбиржа ISS"}
+
+
+def run_analysis(ticker: str) -> dict[str, Any]:
+    """Совместимость со старым API."""
+    ticker = ticker.strip().upper()
     recommendations = analyze_ticker(ticker)
     items = [
         {
@@ -370,28 +406,22 @@ def run_analysis(ticker: str) -> dict[str, Any]:
     ]
 
     priority = {"SELL": 3, "BUY": 2, "HOLD": 1}
-    aggregate_signal = max((rec.signal for rec in recommendations), key=lambda s: priority.get(s, 0), default="HOLD")
-
+    aggregate = max((x["signal"] for x in items), key=lambda s: priority.get(s, 0), default="HOLD")
     return {
         "ticker": ticker,
-        "signal": aggregate_signal,
-        "signal_ru": signal_to_russian(aggregate_signal),
+        "signal": aggregate,
+        "signal_ru": signal_to_russian(aggregate),
         "items": items,
         "source": "Мосбиржа ISS",
-        "note": "Не является индивидуальной инвестиционной рекомендацией.",
+        "note": "Учебная модель. Не является инвестиционной рекомендацией.",
     }
 
 
 def main() -> None:
-    print("Робот-помощник по российским акциям (MOEX)")
-    ticker = input("Введите тикер для дневного трейдинга (например, SBER): ").strip().upper() or "SBER"
+    ticker = input("Введите тикер: ").strip().upper() or "SBER"
     result = run_daytrade_analysis(ticker)
-    print(f"\n{result['ticker']} | {result['signal_ru']}")
+    print(f"{result['ticker']} -> {result['signal_ru']} ({result['confidence']}%)")
     print(result["reason"])
-    print(f"Текущая цена: {result['цена_сейчас']}")
-    print("Последние точки:")
-    for point in result["all_points"][-5:]:
-        print(f"- {point['time']} | {point['type_ru']} | {point['price']} | {point['comment']}")
 
 
 if __name__ == "__main__":
