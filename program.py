@@ -164,5 +164,40 @@ def main() -> None:
             print(f"\n[{ticker}] Ошибка анализа: {error}")
 
 
+def run_analysis(ticker: str):
+    """
+    Обертка для веб-сервиса.
+    Возвращает dict с агрегированным сигналом и деталями по таймфреймам.
+    """
+    ticker = ticker.strip().upper()
+    if not ticker:
+        raise ValueError("Тикер не должен быть пустым")
+
+    recommendations = analyze_ticker(ticker)
+    items = [
+        {
+            "timeframe": rec.timeframe,
+            "last_price": round(rec.last_price, 4),
+            "sma_fast": round(rec.sma_fast, 4),
+            "sma_slow": round(rec.sma_slow, 4),
+            "rsi": round(rec.rsi, 2),
+            "signal": rec.signal,
+            "reason": rec.reason,
+        }
+        for rec in recommendations
+    ]
+
+    priority = {"SELL": 3, "BUY": 2, "HOLD": 1}
+    aggregate_signal = max((rec.signal for rec in recommendations), key=lambda s: priority.get(s, 0), default="HOLD")
+
+    return {
+        "ticker": ticker,
+        "signal": aggregate_signal,
+        "items": items,
+        "source": "MOEX ISS",
+        "note": "Не является индивидуальной инвестиционной рекомендацией.",
+    }
+
+
 if __name__ == "__main__":
     main()
