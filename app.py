@@ -35,6 +35,10 @@ PAGE = """
     .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
     .chip { padding:6px 10px; border-radius:999px; background:rgba(59,130,246,.18); border:1px solid rgba(59,130,246,.4); color:#bfdbfe; cursor:pointer; font-size:12px; }
     .chip:hover { filter: brightness(1.1); }
+    .strength-wrap { margin-top:10px; }
+    .strength-row { display:flex; height:12px; border-radius:999px; overflow:hidden; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.14); }
+    .bull-bar { background: linear-gradient(90deg,#10b981,#34d399); }
+    .bear-bar { background: linear-gradient(90deg,#f87171,#ef4444); }
 
   </style>
 </head>
@@ -64,6 +68,14 @@ PAGE = """
         <div id="stats" class="muted">Статистика: -</div>
         <div id="regime" class="muted">Режим рынка: -</div>
         <div id="trendPhase" class="muted">Тренд-фаза: -</div>
+        <div id="bias" class="muted">Сила рынка: -</div>
+        <div class="strength-wrap">
+          <div class="strength-row">
+            <div id="bullBar" class="bull-bar" style="width:50%"></div>
+            <div id="bearBar" class="bear-bar" style="width:50%"></div>
+          </div>
+          <div id="strengthText" class="muted" style="margin-top:6px;">Быки 50% / Медведи 50%</div>
+        </div>
         <div id="note" class="muted"></div>
       </div>
     </div>
@@ -85,6 +97,8 @@ PAGE = """
               <th>Цена</th>
               <th>Winrate</th>
               <th>PF</th>
+              <th>Быки</th>
+              <th>Медведи</th>
               <th>Режим рынка</th>
               <th>Причина</th>
             </tr>
@@ -210,7 +224,13 @@ async function analyzeTicker(ticker) {
   document.getElementById('regime').textContent = `Режим рынка: ${data.market_regime_ru || '-'}`;
   const ts = data.trend_start_time || '-';
   const te = data.trend_end_time || '-';
+  const bulls = Number(data.bull_strength_pct ?? 50);
+  const bears = Number(data.bear_strength_pct ?? 50);
   document.getElementById('trendPhase').textContent = `Тренд-фаза: старт ${ts} | завершение ${te}`;
+  document.getElementById('bias').textContent = `Сила рынка: ${data.market_bias_ru || '-'}`;
+  document.getElementById('bullBar').style.width = `${bulls}%`;
+  document.getElementById('bearBar').style.width = `${bears}%`;
+  document.getElementById('strengthText').textContent = `Быки ${bulls}% / Медведи ${bears}%`;
   document.getElementById('note').textContent = data.note || '';
 
   saveRecentTicker(t);
@@ -227,7 +247,7 @@ async function loadRecommended() {
   (data.items || []).forEach(row => {
     const tr = document.createElement('tr');
     tr.className = 'clickable';
-    tr.innerHTML = `<td>${row.ticker}</td><td>${row.signal_ru}</td><td>${row.confidence}%</td><td>${row.price}</td><td>${row.winrate}%</td><td>${row.profit_factor}</td><td>${row.market_regime_ru || '-'}</td><td>${row.reason}</td>`;
+    tr.innerHTML = `<td>${row.ticker}</td><td>${row.signal_ru}</td><td>${row.confidence}%</td><td>${row.price}</td><td>${row.winrate}%</td><td>${row.profit_factor}</td><td>${row.bull_strength_pct ?? '-'}%</td><td>${row.bear_strength_pct ?? '-'}%</td><td>${row.market_regime_ru || '-'}</td><td>${row.reason}</td>`;
     tr.addEventListener('click', () => analyzeTicker(row.ticker));
     body.appendChild(tr);
   });
