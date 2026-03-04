@@ -13,10 +13,10 @@ PAGE = """
   <title>MOEX Аналитик</title>
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; background: #0b1220; color: #e6edf3; }
-    .wrap { max-width: 900px; margin: 0 auto; padding: 28px; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 28px; }
     .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); border-radius: 18px; padding: 18px; box-shadow: 0 10px 25px rgba(0,0,0,.25); }
     h1 { margin: 0 0 8px; font-size: 28px; }
-    p { margin: 0 0 16px; color: rgba(230,237,243,0.75); }
+    p { margin: 0 0 16px; color: rgba(230,237,243,0.80); }
     form { display: flex; gap: 10px; flex-wrap: wrap; }
     input { flex: 1; min-width: 220px; padding: 12px 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.18); background: rgba(0,0,0,0.25); color: #e6edf3; outline: none; }
     button { padding: 12px 14px; border-radius: 12px; border: 0; background: #3b82f6; color: white; cursor: pointer; font-weight: 600; }
@@ -26,8 +26,17 @@ PAGE = """
     .buy { background: rgba(16,185,129,.18); border: 1px solid rgba(16,185,129,.35); color: #a7f3d0; }
     .sell { background: rgba(239,68,68,.18); border: 1px solid rgba(239,68,68,.35); color: #fecaca; }
     .hold { background: rgba(234,179,8,.18); border: 1px solid rgba(234,179,8,.35); color: #fde68a; }
-    pre { white-space: pre-wrap; background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,0.12); padding: 12px; border-radius: 14px; overflow: auto; }
-    .muted { color: rgba(230,237,243,0.70); font-size: 13px; }
+    .muted { color: rgba(230,237,243,0.72); font-size: 13px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.10); font-size: 14px; }
+    th { color: #bfdbfe; font-weight: 600; }
+    .bar-wrap { margin-top: 6px; }
+    .bar-label { font-size: 12px; color: rgba(230,237,243,0.80); margin-bottom: 4px; }
+    .bar-bg { background: rgba(255,255,255,0.10); border-radius: 999px; overflow: hidden; height: 10px; }
+    .bar-fill { height: 10px; background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+    .legend { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color: rgba(230,237,243,0.82); margin-top:10px; }
     a { color: #93c5fd; }
   </style>
 </head>
@@ -35,7 +44,7 @@ PAGE = """
   <div class="wrap">
     <div class="card">
       <h1>MOEX Робот-аналитик 🚀</h1>
-      <p>Введите тикер (например: <b>SBER</b>, <b>GAZP</b>, <b>LKOH</b>) и получите сигналы.</p>
+      <p>Введите тикер (например: <b>SBER</b>, <b>GAZP</b>, <b>LKOH</b>) и получите понятную рекомендацию и мини‑график.</p>
 
       <form method="get" action="/analyze">
         <input name="ticker" value="{{ ticker|e }}" placeholder="Тикер (SBER)" autocomplete="off" />
@@ -53,19 +62,59 @@ PAGE = """
       {% if result %}
         <div class="row">
           <div class="card">
-            <div class="muted">Результат</div>
-            {% if result.get("signal") %}
-              {% set s = result.get("signal","").upper() %}
-              {% if "BUY" in s %}
-                <span class="pill buy">BUY</span>
-              {% elif "SELL" in s %}
-                <span class="pill sell">SELL</span>
-              {% else %}
-                <span class="pill hold">HOLD</span>
-              {% endif %}
+            <div class="muted">Итог по тикеру {{ result.get("ticker", ticker)|e }}</div>
+            {% set s = result.get("signal", "HOLD") %}
+            {% set sru = result.get("signal_ru", "Держать") %}
+            {% if "BUY" in s %}
+              <span class="pill buy">{{ sru }}</span>
+            {% elif "SELL" in s %}
+              <span class="pill sell">{{ sru }}</span>
+            {% else %}
+              <span class="pill hold">{{ sru }}</span>
             {% endif %}
-            <pre>{{ result_text|e }}</pre>
-            <div class="muted">
+
+            <div class="grid" style="margin-top:12px;">
+              <div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Таймфрейм</th>
+                      <th>Сигнал</th>
+                      <th>Цена</th>
+                      <th>RSI</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for item in result.get("items", []) %}
+                      <tr>
+                        <td>{{ item.get("timeframe") }}</td>
+                        <td>{{ item.get("signal_ru", item.get("signal")) }}</td>
+                        <td>{{ "%.2f"|format(item.get("last_price", 0)) }}</td>
+                        <td>{{ "%.2f"|format(item.get("rsi", 0)) }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+
+              <div>
+                <div class="muted">Визуальный график (цена по таймфреймам)</div>
+                {% for item in result.get("items", []) %}
+                  <div class="bar-wrap">
+                    <div class="bar-label">{{ item.get("timeframe") }} — {{ "%.2f"|format(item.get("last_price", 0)) }}</div>
+                    <div class="bar-bg">
+                      <div class="bar-fill" style="width: {{ item.get('price_percent', 0) }}%;"></div>
+                    </div>
+                  </div>
+                {% endfor %}
+                <div class="legend">
+                  <span>Источник: {{ result.get("source", "Мосбиржа ISS") }}</span>
+                  <span>{{ result.get("note", "Не является индивидуальной инвестиционной рекомендацией.") }}</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="muted" style="margin-top:10px;">
               API: <a href="/api/analyze?ticker={{ ticker|e }}">/api/analyze?ticker={{ ticker|e }}</a>
             </div>
           </div>
@@ -82,6 +131,29 @@ PAGE = """
 """
 
 
+def _signal_to_russian(signal: str) -> str:
+    mapping = {"BUY": "Покупать", "SELL": "Продавать", "HOLD": "Держать"}
+    return mapping.get((signal or "").upper(), "Держать")
+
+
+def _enrich_result_for_ui(result: dict) -> dict:
+    items = result.get("items", [])
+    prices = [float(item.get("last_price", 0) or 0) for item in items]
+    max_price = max(prices) if prices else 1.0
+
+    enriched_items = []
+    for item in items:
+        price = float(item.get("last_price", 0) or 0)
+        enriched = dict(item)
+        enriched["signal_ru"] = _signal_to_russian(str(item.get("signal", "HOLD")))
+        enriched["price_percent"] = round((price / max_price) * 100, 2) if max_price > 0 else 0
+        enriched_items.append(enriched)
+
+    enriched_result = dict(result)
+    enriched_result["items"] = enriched_items
+    enriched_result["signal_ru"] = _signal_to_russian(str(result.get("signal", "HOLD")))
+    enriched_result["source"] = result.get("source", "Мосбиржа ISS")
+    return enriched_result
 
 
 def _analyze_with_fallback(ticker: str):
@@ -115,25 +187,14 @@ def _analyze_with_fallback(ticker: str):
         "ticker": ticker,
         "signal": aggregate_signal,
         "items": items,
-        "source": "MOEX ISS",
+        "source": "Мосбиржа ISS",
         "note": "Не является индивидуальной инвестиционной рекомендацией.",
     }
-
-def _result_to_pretty_text(result) -> str:
-    # Красивый вывод в <pre>
-    if isinstance(result, str):
-        return result
-    if isinstance(result, dict):
-        lines = []
-        for k, v in result.items():
-            lines.append(f"{k}: {v}")
-        return "\n".join(lines)
-    return str(result)
 
 
 @app.get("/")
 def home():
-    return render_template_string(PAGE, ticker="SBER", result=None, result_text="", error=None)
+    return render_template_string(PAGE, ticker="SBER", result=None, error=None)
 
 
 @app.get("/analyze")
@@ -141,29 +202,21 @@ def analyze_page():
     ticker = (request.args.get("ticker") or "SBER").strip().upper()
     try:
         result = _analyze_with_fallback(ticker)
-        return render_template_string(
-            PAGE,
-            ticker=ticker,
-            result=result if isinstance(result, dict) else {"signal": ""},
-            result_text=_result_to_pretty_text(result),
-            error=None,
-        )
-    except Exception as e:
-        return render_template_string(PAGE, ticker=ticker, result=None, result_text="", error=str(e)), 500
+        ui_result = _enrich_result_for_ui(result if isinstance(result, dict) else {"ticker": ticker, "signal": "HOLD", "items": []})
+        return render_template_string(PAGE, ticker=ticker, result=ui_result, error=None)
+    except Exception as error:
+        return render_template_string(PAGE, ticker=ticker, result=None, error=str(error)), 500
 
 
 @app.get("/api/analyze")
 def analyze_api():
     ticker = (request.args.get("ticker") or "SBER").strip().upper()
     result = _analyze_with_fallback(ticker)
-    # Если результат строка — завернем в JSON
     if isinstance(result, str):
-        return jsonify({"ticker": ticker, "output": result})
+        return jsonify({"тикер": ticker, "результат": result})
     return jsonify(result)
 
 
-# Важно для Render:
-# Gunicorn будет импортировать app:app, а этот блок нужен только для локального запуска.
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
