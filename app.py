@@ -82,6 +82,43 @@ PAGE = """
 """
 
 
+
+
+def _analyze_with_fallback(ticker: str):
+    """Совместимость: используем run_analysis, а если его нет — собираем ответ из analyze_ticker."""
+    run_analysis = getattr(program, "run_analysis", None)
+    if callable(run_analysis):
+        return run_analysis(ticker)
+
+    analyze_ticker = getattr(program, "analyze_ticker", None)
+    if not callable(analyze_ticker):
+        raise AttributeError("В модуле program нет функций run_analysis и analyze_ticker")
+
+    recommendations = analyze_ticker(ticker)
+    items = []
+    for rec in recommendations:
+        items.append(
+            {
+                "timeframe": rec.timeframe,
+                "last_price": round(rec.last_price, 4),
+                "sma_fast": round(rec.sma_fast, 4),
+                "sma_slow": round(rec.sma_slow, 4),
+                "rsi": round(rec.rsi, 2),
+                "signal": rec.signal,
+                "reason": rec.reason,
+            }
+        )
+
+    priority = {"SELL": 3, "BUY": 2, "HOLD": 1}
+    aggregate_signal = max((item["signal"] for item in items), key=lambda s: priority.get(s, 0), default="HOLD")
+    return {
+        "ticker": ticker,
+        "signal": aggregate_signal,
+        "items": items,
+        "source": "MOEX ISS",
+        "note": "Не является индивидуальной инвестиционной рекомендацией.",
+    }
+
 def _result_to_pretty_text(result) -> str:
     # Красивый вывод в <pre>
     if isinstance(result, str):
@@ -103,7 +140,7 @@ def home():
 def analyze_page():
     ticker = (request.args.get("ticker") or "SBER").strip().upper()
     try:
-        result = program.run_analysis(ticker)
+        result = _analyze_with_fallback(ticker)
         return render_template_string(
             PAGE,
             ticker=ticker,
@@ -118,7 +155,7 @@ def analyze_page():
 @app.get("/api/analyze")
 def analyze_api():
     ticker = (request.args.get("ticker") or "SBER").strip().upper()
-    result = program.run_analysis(ticker)
+    result = _analyze_with_fallback(ticker)
     # Если результат строка — завернем в JSON
     if isinstance(result, str):
         return jsonify({"ticker": ticker, "output": result})
