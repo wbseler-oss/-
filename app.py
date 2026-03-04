@@ -57,6 +57,8 @@ PAGE = """
         <p id="reason" class="muted">Нажмите «Анализ по акции»</p>
         <div id="price" class="muted">Цена: -</div>
         <div id="confidence" class="muted">Уверенность: -</div>
+        <div id="stats" class="muted">Статистика: -</div>
+        <div class="muted" id="note"></div>
         <ul id="details" class="muted"></ul>
       </div>
     </div>
@@ -72,6 +74,8 @@ PAGE = """
               <th>Уверенность</th>
               <th>Цена</th>
               <th>Причина</th>
+              <th>Winrate</th>
+              <th>PF</th>
             </tr>
           </thead>
           <tbody id="screenerBody"></tbody>
@@ -147,6 +151,9 @@ async function analyzeOne() {
   document.getElementById('reason').textContent = data.reason || '-';
   document.getElementById('price').textContent = `Цена: ${data['цена_сейчас']}`;
   document.getElementById('confidence').textContent = `Уверенность: ${data.confidence || '-'}%`;
+  const st = data.stats || {};
+  document.getElementById('stats').textContent = `Статистика: сделок ${st.total_trades ?? '-'}, winrate ${st.winrate_pct ?? '-'}%, PF ${st.profit_factor ?? '-'}`;
+  document.getElementById('note').textContent = data.note || '';
 
   const details = document.getElementById('details');
   details.innerHTML = '';
@@ -167,7 +174,7 @@ async function analyzeScreener() {
 
   (data.items || []).forEach(row => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${row.ticker}</td><td>${row.signal_ru}</td><td>${row.confidence}%</td><td>${row.price}</td><td>${row.reason}</td>`;
+    tr.innerHTML = `<td>${row.ticker}</td><td>${row.signal_ru}</td><td>${row.confidence}%</td><td>${row.price}</td><td>${row.reason}</td><td>${row.winrate ?? '-'}%</td><td>${row.profit_factor ?? '-'}</td>`;
     body.appendChild(tr);
   });
 }
