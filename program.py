@@ -1,4 +1,4 @@
-"""Консольный робот-аналитик по российским акциям (MOEX)."""
+"""Робот-аналитик MOEX: среднесрок + дневной трейдинг (интрадей)."""
 
 from __future__ import annotations
 
@@ -9,9 +9,25 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Iterable
+from typing import Any, Iterable
 
 MOEX_HISTORY_URL = "https://iss.moex.com/iss/history/engines/stock/markets/shares/boards/TQBR/securities/{ticker}.json"
+MOEX_CANDLES_URL = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{ticker}/candles.json"
+MOEX_SECURITIES_URL = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json"
+
+DEFAULT_TICKERS = [
+    "SBER",
+    "GAZP",
+    "LKOH",
+    "NVTK",
+    "ROSN",
+    "GMKN",
+    "TATN",
+    "YDEX",
+    "PLZL",
+    "CHMF",
+    "ALRS",
+]
 
 
 @dataclass
@@ -26,10 +42,25 @@ class Recommendation:
     reason: str
 
 
+def signal_to_russian(signal: str) -> str:
+    mapping = {"BUY": "Покупать", "SELL": "Закрывать сделку", "HOLD": "Наблюдать"}
+    return mapping.get((signal or "").upper(), "Наблюдать")
+
+
 def moving_average(values: list[float], window: int) -> float:
     if len(values) < window:
         raise ValueError(f"Недостаточно данных для SMA{window}: {len(values)}")
     return statistics.fmean(values[-window:])
+
+
+def compute_ema(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    k = 2 / (period + 1)
+    result = [values[0]]
+    for value in values[1:]:
+        result.append(value * k + result[-1] * (1 - k))
+    return result
 
 
 def compute_rsi(values: list[float], period: int = 14) -> float:
@@ -57,11 +88,6 @@ def compute_rsi(values: list[float], period: int = 14) -> float:
     return 100 - (100 / (1 + rs))
 
 
-def signal_to_russian(signal: str) -> str:
-    mapping = {"BUY": "Покупать", "SELL": "Продавать", "HOLD": "Держать"}
-    return mapping.get(signal.upper(), "Держать")
-
-
 def classify_signal(last_price: float, sma_fast: float, sma_slow: float, rsi: float) -> tuple[str, str]:
     trend_up = last_price > sma_fast > sma_slow
     trend_down = last_price < sma_fast < sma_slow
@@ -85,6 +111,16 @@ def parse_close_prices(rows: Iterable[list[object]], columns: list[str]) -> list
     return closes
 
 
+def _fetch_json(url: str, ticker: str) -> dict[str, Any]:
+    try:
+        with urllib.request.urlopen(url, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"HTTP ошибка для {ticker}: {error.code}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Ошибка сети для {ticker}: {error.reason}") from error
+
+
 def fetch_close_prices(ticker: str, days: int) -> list[float]:
     start_date = (date.today() - timedelta(days=days)).isoformat()
     all_rows: list[list[object]] = []
@@ -94,14 +130,7 @@ def fetch_close_prices(ticker: str, days: int) -> list[float]:
     while True:
         query = urllib.parse.urlencode({"from": start_date, "start": offset})
         url = MOEX_HISTORY_URL.format(ticker=ticker.upper()) + f"?{query}"
-
-        try:
-            with urllib.request.urlopen(url, timeout=20) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            raise RuntimeError(f"HTTP ошибка для {ticker}: {error.code}") from error
-        except urllib.error.URLError as error:
-            raise RuntimeError(f"Ошибка сети для {ticker}: {error.reason}") from error
+        data = _fetch_json(url, ticker)
 
         history = data.get("history", {})
         page_columns = history.get("columns", [])
@@ -176,36 +205,151 @@ def analyze_ticker(ticker: str) -> list[Recommendation]:
     return recommendations
 
 
-def print_recommendations(recommendations: list[Recommendation]) -> None:
-    for rec in recommendations:
-        print(f"\n[{rec.ticker}] {rec.timeframe}")
-        print(f"Цена: {rec.last_price:.2f}")
-        print(f"SMA fast: {rec.sma_fast:.2f} | SMA slow: {rec.sma_slow:.2f} | RSI14: {rec.rsi:.2f}")
-        print(f"Рекомендация: {rec.signal} — {rec.reason}")
+def fetch_tickers_list(limit: int = 200) -> list[str]:
+    all_tickers: list[str] = []
+    offset = 0
+
+    while len(all_tickers) < limit:
+        query = urllib.parse.urlencode({"start": offset})
+        url = f"{MOEX_SECURITIES_URL}?{query}"
+        data = _fetch_json(url, "TQBR")
+
+        securities = data.get("securities", {})
+        columns = securities.get("columns", [])
+        rows = securities.get("data", [])
+        if not columns or not rows:
+            break
+
+        secid_idx = columns.index("SECID")
+        for row in rows:
+            secid = row[secid_idx]
+            if secid:
+                all_tickers.append(str(secid))
+                if len(all_tickers) >= limit:
+                    break
+
+        offset += len(rows)
+        if len(rows) == 0:
+            break
+
+    unique = sorted(set(all_tickers))
+    return unique or DEFAULT_TICKERS
 
 
-def main() -> None:
-    print("Робот-помощник по российским акциям (MOEX)")
-    print("Это не индивидуальная инвестиционная рекомендация.")
-    raw = input(
-        "Введите тикеры через запятую (пример: SBER,GAZP,LKOH) или Enter для списка по умолчанию: "
-    ).strip()
+def fetch_intraday_candles(ticker: str, interval: int = 10, lookback_hours: int = 12) -> tuple[list[str], list[float]]:
+    from_dt = (date.today() - timedelta(days=1)).isoformat()
+    params = urllib.parse.urlencode({"interval": interval, "from": from_dt})
+    url = MOEX_CANDLES_URL.format(ticker=ticker.upper()) + f"?{params}"
 
-    tickers = ["SBER", "GAZP", "LKOH", "ROSN", "NVTK"] if not raw else [x.strip().upper() for x in raw.split(",") if x.strip()]
+    data = _fetch_json(url, ticker)
+    candles = data.get("candles", {})
+    columns = candles.get("columns", [])
+    rows = candles.get("data", [])
 
-    for ticker in tickers:
-        try:
-            recommendations = analyze_ticker(ticker)
-            print_recommendations(recommendations)
-        except Exception as error:
-            print(f"\n[{ticker}] Ошибка анализа: {error}")
+    if not columns or not rows:
+        raise RuntimeError(f"Нет интрадей-данных по тикеру {ticker}")
+
+    close_idx = columns.index("close")
+    begin_idx = columns.index("begin")
+
+    labels: list[str] = []
+    prices: list[float] = []
+    for row in rows:
+        close = row[close_idx]
+        begin = row[begin_idx]
+        if close is None:
+            continue
+        labels.append(str(begin)[11:16] if begin else "")
+        prices.append(float(close))
+
+    # ограничим последними свечами для скорости UI
+    max_points = max(24, int(lookback_hours * 60 / max(interval, 1)))
+    return labels[-max_points:], prices[-max_points:]
 
 
-def run_analysis(ticker: str):
-    """
-    Обертка для веб-сервиса.
-    Возвращает dict с агрегированным сигналом и деталями по таймфреймам.
-    """
+def build_trade_points(labels: list[str], prices: list[float]) -> tuple[list[dict[str, Any]], str, str]:
+    if len(prices) < 30:
+        raise RuntimeError("Недостаточно интрадей-данных для сигнала. Попробуйте позже.")
+
+    ema_fast = compute_ema(prices, 9)
+    ema_slow = compute_ema(prices, 21)
+    rsi = compute_rsi(prices, 14)
+
+    points: list[dict[str, Any]] = []
+    for idx in range(1, len(prices)):
+        was_below = ema_fast[idx - 1] <= ema_slow[idx - 1]
+        now_above = ema_fast[idx] > ema_slow[idx]
+        was_above = ema_fast[idx - 1] >= ema_slow[idx - 1]
+        now_below = ema_fast[idx] < ema_slow[idx]
+
+        if was_below and now_above:
+            points.append(
+                {
+                    "type": "BUY",
+                    "type_ru": "Покупка",
+                    "index": idx,
+                    "time": labels[idx],
+                    "price": round(prices[idx], 4),
+                    "comment": "EMA9 пересекла EMA21 снизу вверх",
+                }
+            )
+        elif was_above and now_below:
+            points.append(
+                {
+                    "type": "SELL",
+                    "type_ru": "Закрытие",
+                    "index": idx,
+                    "time": labels[idx],
+                    "price": round(prices[idx], 4),
+                    "comment": "EMA9 пересекла EMA21 сверху вниз",
+                }
+            )
+
+    last_fast = ema_fast[-1]
+    last_slow = ema_slow[-1]
+    if last_fast > last_slow and rsi < 72:
+        signal = "BUY"
+        reason = "Сигнал на покупку: EMA9 выше EMA21, RSI не в сильной перекупленности"
+    elif last_fast < last_slow or rsi > 75:
+        signal = "SELL"
+        reason = "Сигнал на закрытие: EMA9 ниже EMA21 или RSI показывает перегрев"
+    else:
+        signal = "HOLD"
+        reason = "Явного сигнала нет, лучше наблюдать"
+
+    return points, signal, reason
+
+
+def run_daytrade_analysis(ticker: str) -> dict[str, Any]:
+    ticker = ticker.strip().upper()
+    if not ticker:
+        raise ValueError("Тикер не должен быть пустым")
+
+    labels, prices = fetch_intraday_candles(ticker, interval=10, lookback_hours=12)
+    points, signal, reason = build_trade_points(labels, prices)
+
+    buy_points = [p for p in points if p["type"] == "BUY"]
+    sell_points = [p for p in points if p["type"] == "SELL"]
+
+    return {
+        "ticker": ticker,
+        "режим": "Дневной трейдинг (интервал 10 минут)",
+        "signal": signal,
+        "signal_ru": signal_to_russian(signal),
+        "reason": reason,
+        "цена_сейчас": round(prices[-1], 4),
+        "labels": labels,
+        "prices": prices,
+        "buy_points": buy_points,
+        "sell_points": sell_points,
+        "all_points": points,
+        "source": "Мосбиржа ISS",
+        "note": "Не является индивидуальной инвестиционной рекомендацией.",
+    }
+
+
+def run_analysis(ticker: str) -> dict[str, Any]:
+    """Совместимость: старый endpoint (среднесрочный обзор)."""
     ticker = ticker.strip().upper()
     if not ticker:
         raise ValueError("Тикер не должен быть пустым")
@@ -236,6 +380,18 @@ def run_analysis(ticker: str):
         "source": "Мосбиржа ISS",
         "note": "Не является индивидуальной инвестиционной рекомендацией.",
     }
+
+
+def main() -> None:
+    print("Робот-помощник по российским акциям (MOEX)")
+    ticker = input("Введите тикер для дневного трейдинга (например, SBER): ").strip().upper() or "SBER"
+    result = run_daytrade_analysis(ticker)
+    print(f"\n{result['ticker']} | {result['signal_ru']}")
+    print(result["reason"])
+    print(f"Текущая цена: {result['цена_сейчас']}")
+    print("Последние точки:")
+    for point in result["all_points"][-5:]:
+        print(f"- {point['time']} | {point['type_ru']} | {point['price']} | {point['comment']}")
 
 
 if __name__ == "__main__":
