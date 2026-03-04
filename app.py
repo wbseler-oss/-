@@ -63,6 +63,7 @@ PAGE = """
         <div id="confidence" class="muted">Уверенность: -</div>
         <div id="stats" class="muted">Статистика: -</div>
         <div id="regime" class="muted">Режим рынка: -</div>
+        <div id="trendPhase" class="muted">Тренд-фаза: -</div>
         <div id="note" class="muted"></div>
       </div>
     </div>
@@ -207,6 +208,9 @@ async function analyzeTicker(ticker) {
   const st = data.stats || {};
   document.getElementById('stats').textContent = `Сделок: ${st.total_trades ?? '-'} | Winrate: ${st.winrate_pct ?? '-'}% | PF: ${st.profit_factor ?? '-'}`;
   document.getElementById('regime').textContent = `Режим рынка: ${data.market_regime_ru || '-'}`;
+  const ts = data.trend_start_time || '-';
+  const te = data.trend_end_time || '-';
+  document.getElementById('trendPhase').textContent = `Тренд-фаза: старт ${ts} | завершение ${te}`;
   document.getElementById('note').textContent = data.note || '';
 
   saveRecentTicker(t);
