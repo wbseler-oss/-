@@ -68,6 +68,7 @@ PAGE = """
         <div id="stats" class="muted">Статистика: -</div>
         <div id="regime" class="muted">Режим рынка: -</div>
         <div id="trendPhase" class="muted">Тренд-фаза: -</div>
+        <div id="eodTarget" class="muted">Цель до конца дня: -</div>
         <div id="bias" class="muted">Сила рынка: -</div>
         <div class="strength-wrap">
           <div class="strength-row">
@@ -170,21 +171,36 @@ async function loadTickers() {
   document.getElementById('tickerInput').value = 'SBER';
 }
 
-function drawChart(labels, prices, buyPoints, sellPoints, closePoints) {
-  const buyData = labels.map(() => null);
-  (buyPoints || []).forEach(p => buyData[p.index] = p.price);
-  const sellData = labels.map(() => null);
-  (sellPoints || []).forEach(p => sellData[p.index] = p.price);
-  const closeData = labels.map(() => null);
-  (closePoints || []).forEach(p => closeData[p.index] = p.price);
+function drawChart(labels, prices, forecastLabels, forecastPrices, eodTarget, eodLow, eodHigh, buyPoints, sellPoints, closePoints) {
+  const histLabels = labels || [];
+  const futureLabels = forecastLabels || [];
+  const allLabels = histLabels.concat(futureLabels);
+  const histLen = histLabels.length;
+
+  const priceData = (prices || []).concat(futureLabels.map(() => null));
+  const forecastData = histLabels.map(() => null).concat(forecastPrices || []);
+  const eodLevelData = allLabels.map(() => (typeof eodTarget === "number" ? eodTarget : null));
+  const eodLowData = allLabels.map(() => (typeof eodLow === "number" ? eodLow : null));
+  const eodHighData = allLabels.map(() => (typeof eodHigh === "number" ? eodHigh : null));
+
+  const buyData = allLabels.map(() => null);
+  (buyPoints || []).forEach(p => { if (typeof p.index === 'number' && p.index < histLen) buyData[p.index] = p.price; });
+  const sellData = allLabels.map(() => null);
+  (sellPoints || []).forEach(p => { if (typeof p.index === 'number' && p.index < histLen) sellData[p.index] = p.price; });
+  const closeData = allLabels.map(() => null);
+  (closePoints || []).forEach(p => { if (typeof p.index === 'number' && p.index < histLen) closeData[p.index] = p.price; });
 
   if (chart) chart.destroy();
   chart = new Chart(document.getElementById('chart'), {
     type: 'line',
     data: {
-      labels,
+      labels: allLabels,
       datasets: [
-        {label:'Цена', data:prices, borderColor:'#60a5fa', tension:0.25, pointRadius:0},
+        {label:'Цена', data:priceData, borderColor:'#60a5fa', tension:0.25, pointRadius:0},
+        {label:'Прогноз (тех-модель)', data:forecastData, borderColor:'#c084fc', borderDash:[6,6], tension:0.25, pointRadius:0},
+        {label:'Цель до конца дня', data:eodLevelData, borderColor:'#f59e0b', borderDash:[10,6], tension:0, pointRadius:0},
+        {label:'EOD нижняя граница', data:eodLowData, borderColor:'rgba(245,158,11,0.35)', borderDash:[3,5], tension:0, pointRadius:0},
+        {label:'EOD верхняя граница', data:eodHighData, borderColor:'rgba(245,158,11,0.35)', borderDash:[3,5], tension:0, pointRadius:0},
         {label:'BUY (лонг)', data:buyData, borderColor:'#34d399', backgroundColor:'#34d399', pointRadius:5, showLine:false},
         {label:'SELL (шорт)', data:sellData, borderColor:'#f87171', backgroundColor:'#f87171', pointRadius:5, showLine:false},
         {label:'CLOSE (выход)', data:closeData, borderColor:'#fbbf24', backgroundColor:'#fbbf24', pointRadius:5, showLine:false},
@@ -226,7 +242,12 @@ async function analyzeTicker(ticker) {
   const te = data.trend_end_time || '-';
   const bulls = Number(data.bull_strength_pct ?? 50);
   const bears = Number(data.bear_strength_pct ?? 50);
+  const eodTarget = Number(data.eod_target_price);
+  const eodLow = Number(data.eod_target_low);
+  const eodHigh = Number(data.eod_target_high);
+  const eodBars = data.eod_remaining_bars ?? '-';
   document.getElementById('trendPhase').textContent = `Тренд-фаза: старт ${ts} | завершение ${te}`;
+  document.getElementById('eodTarget').textContent = `Цель до конца дня: ${Number.isFinite(eodTarget) ? eodTarget.toFixed(2) : '-'} (диапазон ${Number.isFinite(eodLow) ? eodLow.toFixed(2) : '-'}–${Number.isFinite(eodHigh) ? eodHigh.toFixed(2) : '-'}, баров: ${eodBars})`;
   document.getElementById('bias').textContent = `Сила рынка: ${data.market_bias_ru || '-'}`;
   document.getElementById('bullBar').style.width = `${bulls}%`;
   document.getElementById('bearBar').style.width = `${bears}%`;
@@ -235,7 +256,7 @@ async function analyzeTicker(ticker) {
 
   saveRecentTicker(t);
   renderRecentTickers();
-  drawChart(data.labels || [], data.prices || [], data.buy_points || [], data.sell_points || [], data.close_points || []);
+  drawChart(data.labels || [], data.prices || [], data.forecast_labels || [], data.forecast_prices || [], data.eod_target_price, data.eod_target_low, data.eod_target_high, data.buy_points || [], data.sell_points || [], data.close_points || []);
 }
 
 async function loadRecommended() {
