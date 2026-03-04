@@ -585,6 +585,113 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
     }
 
 
+
+
+def build_price_forecast(labels: list[str], closes: list[float], highs: list[float], lows: list[float], signal: str, market_regime: str, steps: int = 8) -> dict[str, list[float | str]]:
+    """Простая тех-модель прогноза на несколько баров вперед (не гарантия)."""
+    if len(closes) < 30:
+        return {"forecast_labels": [], "forecast_prices": []}
+
+    ema9 = compute_ema(closes, 9)
+    ema21 = compute_ema(closes, 21)
+    atr = compute_atr(highs, lows, closes, 14)
+    _, _, macd_hist = compute_macd(closes)
+    adx = compute_adx(highs, lows, closes, 14)
+
+    last_price = closes[-1]
+    base_slope_pct = ((ema9[-1] - ema21[-1]) / last_price * 100) if last_price else 0.0
+    momentum_pct = (macd_hist[-1] / last_price * 100) if last_price else 0.0
+    vol_step_pct = (atr[-1] / last_price * 100) if last_price else 0.0
+
+    regime_mult = 1.0
+    if market_regime in {"TREND_UP_STRONG", "TREND_DOWN_STRONG"}:
+        regime_mult = 1.25
+    elif market_regime in {"TREND_UP", "TREND_DOWN"}:
+        regime_mult = 1.0
+    else:
+        regime_mult = 0.45
+
+    dir_bias = 0.0
+    if signal == "BUY":
+        dir_bias = 1.0
+    elif signal == "SELL":
+        dir_bias = -1.0
+
+    drift_pct = regime_mult * (0.55 * base_slope_pct + 0.45 * momentum_pct)
+    drift_pct += dir_bias * max(0.015, vol_step_pct * 0.25)
+
+    forecast_prices: list[float] = []
+    price = last_price
+    for step in range(1, steps + 1):
+        # Небольшое затухание, чтобы прогноз не был линейно-агрессивным.
+        local_drift = drift_pct * (0.92 ** (step - 1))
+        price = max(0.01, price * (1 + local_drift / 100))
+        forecast_prices.append(round(price, 4))
+
+    # Метки времени продолжаем на +10 минут (как базовый таймфрейм приложения).
+    try:
+        h, m = map(int, str(labels[-1]).split(":"))
+        forecast_labels = []
+        total = h * 60 + m
+        for i in range(1, steps + 1):
+            mm = (total + 10 * i) % (24 * 60)
+            forecast_labels.append(f"{mm // 60:02d}:{mm % 60:02d}")
+    except Exception:
+        forecast_labels = [f"+{10 * i}м" for i in range(1, steps + 1)]
+
+    return {"forecast_labels": forecast_labels, "forecast_prices": forecast_prices}
+
+
+
+
+def build_eod_projection(labels: list[str], closes: list[float], highs: list[float], lows: list[float], market_regime: str) -> dict[str, float | str | int]:
+    """Оценка целевого уровня цены к концу текущего дня (не гарантия)."""
+    if len(closes) < 20:
+        last = closes[-1] if closes else 0.0
+        return {
+            "eod_label": "23:50",
+            "eod_target_price": round(last, 4),
+            "eod_target_low": round(last, 4),
+            "eod_target_high": round(last, 4),
+            "eod_remaining_bars": 0,
+        }
+
+    atr = compute_atr(highs, lows, closes, 14)
+    ema9 = compute_ema(closes, 9)
+    ema21 = compute_ema(closes, 21)
+
+    last_price = closes[-1]
+    lookback = min(24, len(closes) - 1)
+    slope_pct = ((closes[-1] - closes[-1 - lookback]) / max(closes[-1 - lookback], 0.01)) * 100 / max(lookback, 1)
+    ema_impulse_pct = ((ema9[-1] - ema21[-1]) / max(last_price, 0.01)) * 100
+
+    try:
+        h, m = map(int, str(labels[-1]).split(":"))
+        now_min = h * 60 + m
+    except Exception:
+        now_min = 18 * 60
+
+    close_min = 23 * 60 + 50
+    remaining_min = max(0, close_min - now_min)
+    remaining_bars = max(1, remaining_min // 10) if remaining_min > 0 else 1
+
+    regime_mult = 0.55 if market_regime == "RANGE" else (1.15 if "STRONG" in market_regime else 0.9)
+    drift_pct = regime_mult * (0.65 * slope_pct + 0.35 * ema_impulse_pct)
+
+    projected = last_price * (1 + drift_pct / 100 * remaining_bars)
+    band = atr[-1] * max(0.8, min(2.2, remaining_bars / 10))
+    low = max(0.01, projected - band)
+    high = max(low, projected + band)
+
+    return {
+        "eod_label": "23:50",
+        "eod_target_price": round(projected, 4),
+        "eod_target_low": round(low, 4),
+        "eod_target_high": round(high, 4),
+        "eod_remaining_bars": int(remaining_bars),
+    }
+
+
 def run_daytrade_analysis(ticker: str) -> dict[str, Any]:
     ticker = ticker.strip().upper()
     bars = fetch_intraday_bars(ticker, interval=10, lookback_hours=12)
@@ -596,6 +703,8 @@ def run_daytrade_analysis(ticker: str) -> dict[str, Any]:
 
     sim = _simulate_strategy(labels, closes, highs, lows, volumes)
     points = sim["points"]
+    forecast = build_price_forecast(labels, closes, highs, lows, sim["signal"], sim["market_regime"], steps=8)
+    eod = build_eod_projection(labels, closes, highs, lows, sim["market_regime"])
 
     return {
         "ticker": ticker,
@@ -608,6 +717,8 @@ def run_daytrade_analysis(ticker: str) -> dict[str, Any]:
             "Стратегия: тренд-following intraday (в боковике не торгуем, держим позицию до подтвержденного разворота)",
             f"Сделок: {sim['stats']['total_trades']} | Winrate: {sim['stats']['winrate_pct']}%",
             f"Profit Factor: {sim['stats']['profit_factor']}",
+            "Прогноз (пунктир): краткосрочная тех-оценка на 8 баров, не гарантия.",
+            f"Прогноз до конца дня: уровень ~ {eod['eod_target_price']} (диапазон {eod['eod_target_low']}–{eod['eod_target_high']})",
         ],
         "indicators": sim["indicators"],
         "strategy_params": sim["strategy_params"],
@@ -624,6 +735,13 @@ def run_daytrade_analysis(ticker: str) -> dict[str, Any]:
         "цена_сейчас": round(closes[-1], 4),
         "labels": labels,
         "prices": closes,
+        "forecast_labels": forecast["forecast_labels"],
+        "forecast_prices": forecast["forecast_prices"],
+        "eod_label": eod["eod_label"],
+        "eod_target_price": eod["eod_target_price"],
+        "eod_target_low": eod["eod_target_low"],
+        "eod_target_high": eod["eod_target_high"],
+        "eod_remaining_bars": eod["eod_remaining_bars"],
         "buy_points": [p for p in points if p["type"] == "BUY"],
         "sell_points": [p for p in points if p["type"] == "SELL"],
         "close_points": [p for p in points if p["type"] == "CLOSE"],
