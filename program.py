@@ -81,28 +81,44 @@ def parse_close_prices(rows: Iterable[list[object]], columns: list[str]) -> list
 
 
 def fetch_close_prices(ticker: str, days: int) -> list[float]:
-    start = (date.today() - timedelta(days=days)).isoformat()
-    query = urllib.parse.urlencode({"from": start})
-    url = MOEX_HISTORY_URL.format(ticker=ticker.upper()) + f"?{query}"
+    start_date = (date.today() - timedelta(days=days)).isoformat()
+    all_rows: list[list[object]] = []
+    columns: list[str] = []
 
-    try:
-        with urllib.request.urlopen(url, timeout=20) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(f"HTTP ошибка для {ticker}: {error.code}") from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Ошибка сети для {ticker}: {error.reason}") from error
+    offset = 0
+    while True:
+        query = urllib.parse.urlencode({"from": start_date, "start": offset})
+        url = MOEX_HISTORY_URL.format(ticker=ticker.upper()) + f"?{query}"
 
-    history = data.get("history", {})
-    columns = history.get("columns", [])
-    rows = history.get("data", [])
+        try:
+            with urllib.request.urlopen(url, timeout=20) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(f"HTTP ошибка для {ticker}: {error.code}") from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"Ошибка сети для {ticker}: {error.reason}") from error
 
-    if not columns or not rows:
+        history = data.get("history", {})
+        page_columns = history.get("columns", [])
+        page_rows = history.get("data", [])
+
+        if not page_columns:
+            break
+        if not columns:
+            columns = page_columns
+
+        if not page_rows:
+            break
+
+        all_rows.extend(page_rows)
+        offset += len(page_rows)
+
+    if not columns or not all_rows:
         raise RuntimeError(f"Нет данных по тикеру {ticker}. Проверьте символ на MOEX.")
 
-    closes = parse_close_prices(rows, columns)
-    if len(closes) < 30:
-        raise RuntimeError(f"Слишком мало исторических данных по {ticker}: {len(closes)}")
+    closes = parse_close_prices(all_rows, columns)
+    if len(closes) < 150:
+        raise RuntimeError(f"Недостаточно данных для долгосрочного анализа (SMA150): {len(closes)}")
     return closes
 
 
