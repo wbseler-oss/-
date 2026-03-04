@@ -244,9 +244,20 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
     vwap = compute_vwap(highs, lows, closes, volumes)
     atr = compute_atr(highs, lows, closes, 14)
 
+    min_hold_bars = 4
+    reversal_confirm_bars = 2
+    initial_stop_atr = 1.3
+    base_trail_atr = 1.2
+    profit_arm_atr = 2.4
+    armed_trail_atr = 1.8
+    lock_profit_atr = 0.35
+
     trades, points = [], []
     pos = "FLAT"  # FLAT/LONG/SHORT
-    entry_price, entry_i, stop, take = 0.0, 0, 0.0, 0.0
+    entry_price, entry_i, stop = 0.0, 0, 0.0
+    best_price, worst_price = 0.0, 0.0
+    reversal_count = 0
+    profit_armed = False
 
     for i in range(1, len(closes)):
         price = closes[i]
@@ -264,35 +275,71 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
         if pos == "FLAT":
             if cross_up and trend_up and long_setup and volatility_ok:
                 pos, entry_price, entry_i = "LONG", price, i
-                stop, take = price - 1.2 * atr[i], price + 2.2 * atr[i]
+                stop = price - initial_stop_atr * atr[i]
+                best_price, worst_price = highs[i], lows[i]
+                reversal_count = 0
+                profit_armed = False
                 points.append({"type": "BUY", "type_ru": "Покупка (лонг)", "index": i, "time": labels[i], "price": round(price, 4), "comment": "Вход в лонг: фильтры подтверждены"})
             elif cross_dn and trend_down and short_setup and volatility_ok:
                 pos, entry_price, entry_i = "SHORT", price, i
-                stop, take = price + 1.2 * atr[i], price - 2.2 * atr[i]
+                stop = price + initial_stop_atr * atr[i]
+                best_price, worst_price = highs[i], lows[i]
+                reversal_count = 0
+                profit_armed = False
                 points.append({"type": "SELL", "type_ru": "Продажа (шорт)", "index": i, "time": labels[i], "price": round(price, 4), "comment": "Вход в шорт: фильтры подтверждены"})
             continue
 
         if pos == "LONG":
-            stop = max(stop, price - 1.0 * atr[i])
+            best_price = max(best_price, highs[i])
+            mfe = best_price - entry_price
+            if (not profit_armed) and mfe >= profit_arm_atr * atr[i]:
+                profit_armed = True
+                stop = max(stop, entry_price + lock_profit_atr * atr[i])
+
+            trail_atr = armed_trail_atr if profit_armed else base_trail_atr
+            stop = max(stop, best_price - trail_atr * atr[i])
+
+            reverse_now = ema9[i] < ema21[i] and macd_hist[i] < 0 and price < vwap[i]
+            reversal_count = reversal_count + 1 if reverse_now else 0
+            enough_hold = (i - entry_i) >= min_hold_bars
+
             exit_reason = None
             if lows[i] <= stop:
-                exit_price, exit_reason = stop, "Закрытие лонга: стоп/трейлинг"
-            elif highs[i] >= take:
-                exit_price, exit_reason = take, "Закрытие лонга: тейк"
-            elif ema9[i] < ema21[i] and rsi[i] > 55:
-                exit_price, exit_reason = price, "Закрытие лонга: сигнал разворота"
+                exit_price = stop
+                if profit_armed:
+                    exit_reason = "Закрытие лонга: трейлинг после фиксации тренда"
+                else:
+                    exit_reason = "Закрытие лонга: защитный стоп"
+            elif enough_hold and reversal_count >= reversal_confirm_bars and rsi[i] > 50:
+                exit_price = price
+                exit_reason = "Закрытие лонга: подтвержденный разворот (2 бара)"
             else:
                 continue
             pnl = (exit_price - entry_price) / entry_price * 100
         else:  # SHORT
-            stop = min(stop, price + 1.0 * atr[i])
+            worst_price = min(worst_price, lows[i])
+            mfe = entry_price - worst_price
+            if (not profit_armed) and mfe >= profit_arm_atr * atr[i]:
+                profit_armed = True
+                stop = min(stop, entry_price - lock_profit_atr * atr[i])
+
+            trail_atr = armed_trail_atr if profit_armed else base_trail_atr
+            stop = min(stop, worst_price + trail_atr * atr[i])
+
+            reverse_now = ema9[i] > ema21[i] and macd_hist[i] > 0 and price > vwap[i]
+            reversal_count = reversal_count + 1 if reverse_now else 0
+            enough_hold = (i - entry_i) >= min_hold_bars
+
             exit_reason = None
             if highs[i] >= stop:
-                exit_price, exit_reason = stop, "Закрытие шорта: стоп/трейлинг"
-            elif lows[i] <= take:
-                exit_price, exit_reason = take, "Закрытие шорта: тейк"
-            elif ema9[i] > ema21[i] and rsi[i] < 45:
-                exit_price, exit_reason = price, "Закрытие шорта: сигнал разворота"
+                exit_price = stop
+                if profit_armed:
+                    exit_reason = "Закрытие шорта: трейлинг после фиксации тренда"
+                else:
+                    exit_reason = "Закрытие шорта: защитный стоп"
+            elif enough_hold and reversal_count >= reversal_confirm_bars and rsi[i] < 50:
+                exit_price = price
+                exit_reason = "Закрытие шорта: подтвержденный разворот (2 бара)"
             else:
                 continue
             pnl = (entry_price - exit_price) / entry_price * 100
@@ -356,6 +403,14 @@ def _simulate_strategy(labels: list[str], closes: list[float], highs: list[float
             "VWAP": round(vwap[-1], 4),
             "ATR14": round(atr[-1], 4),
         },
+        "strategy_params": {
+            "min_hold_bars": min_hold_bars,
+            "reversal_confirm_bars": reversal_confirm_bars,
+            "initial_stop_atr": initial_stop_atr,
+            "base_trail_atr": base_trail_atr,
+            "profit_arm_atr": profit_arm_atr,
+            "armed_trail_atr": armed_trail_atr,
+        },
     }
 
 
@@ -379,11 +434,12 @@ def run_daytrade_analysis(ticker: str) -> dict[str, Any]:
         "confidence": sim["confidence"],
         "reason": sim["reason"],
         "details": [
-            "Стратегия: тренд + импульс + VWAP + ATR + фильтр волатильности",
+            "Стратегия: тренд + импульс + VWAP + ATR + подтверждение разворота (2 бара) + адаптивный трейлинг",
             f"Сделок: {sim['stats']['total_trades']} | Winrate: {sim['stats']['winrate_pct']}%",
             f"Profit Factor: {sim['stats']['profit_factor']}",
         ],
         "indicators": sim["indicators"],
+        "strategy_params": sim["strategy_params"],
         "stats": sim["stats"],
         "trades": sim["trades"][-15:],
         "цена_сейчас": round(closes[-1], 4),
