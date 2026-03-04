@@ -57,6 +57,11 @@ def compute_rsi(values: list[float], period: int = 14) -> float:
     return 100 - (100 / (1 + rs))
 
 
+def signal_to_russian(signal: str) -> str:
+    mapping = {"BUY": "Покупать", "SELL": "Продавать", "HOLD": "Держать"}
+    return mapping.get(signal.upper(), "Держать")
+
+
 def classify_signal(last_price: float, sma_fast: float, sma_slow: float, rsi: float) -> tuple[str, str]:
     trend_up = last_price > sma_fast > sma_slow
     trend_down = last_price < sma_fast < sma_slow
@@ -117,8 +122,8 @@ def fetch_close_prices(ticker: str, days: int) -> list[float]:
         raise RuntimeError(f"Нет данных по тикеру {ticker}. Проверьте символ на MOEX.")
 
     closes = parse_close_prices(all_rows, columns)
-    if len(closes) < 150:
-        raise RuntimeError(f"Недостаточно данных для долгосрочного анализа (SMA150): {len(closes)}")
+    if len(closes) < 20:
+        raise RuntimeError(f"Слишком мало исторических данных по {ticker}: {len(closes)}")
     return closes
 
 
@@ -133,10 +138,26 @@ def analyze_ticker(ticker: str) -> list[Recommendation]:
 
     recommendations: list[Recommendation] = []
     for timeframe, (fast, slow) in timeframes.items():
+        last_price = closes[-1]
+
+        if len(closes) < slow:
+            recommendations.append(
+                Recommendation(
+                    ticker=ticker.upper(),
+                    timeframe=timeframe,
+                    last_price=last_price,
+                    sma_fast=0.0,
+                    sma_slow=0.0,
+                    rsi=0.0,
+                    signal="HOLD",
+                    reason=f"Недостаточно данных для этого таймфрейма: нужно {slow}, есть {len(closes)}",
+                )
+            )
+            continue
+
         sma_fast = moving_average(closes, fast)
         sma_slow = moving_average(closes, slow)
         rsi = compute_rsi(closes, period=14)
-        last_price = closes[-1]
         signal, reason = classify_signal(last_price, sma_fast, sma_slow, rsi)
 
         recommendations.append(
@@ -198,6 +219,7 @@ def run_analysis(ticker: str):
             "sma_slow": round(rec.sma_slow, 4),
             "rsi": round(rec.rsi, 2),
             "signal": rec.signal,
+            "signal_ru": signal_to_russian(rec.signal),
             "reason": rec.reason,
         }
         for rec in recommendations
@@ -209,8 +231,9 @@ def run_analysis(ticker: str):
     return {
         "ticker": ticker,
         "signal": aggregate_signal,
+        "signal_ru": signal_to_russian(aggregate_signal),
         "items": items,
-        "source": "MOEX ISS",
+        "source": "Мосбиржа ISS",
         "note": "Не является индивидуальной инвестиционной рекомендацией.",
     }
 
